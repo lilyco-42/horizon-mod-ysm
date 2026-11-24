@@ -1,14 +1,15 @@
+mod gui;
 mod ytree_engine;
 
-use mod_api::prelude::*;
-
 use mod_api::{
-    self, ArmPose, BlockEntityDrawContext, CameraShakeEvent, ClientHost,
-    ClientTickPostEvent, Command, CommandEvent, Corner, CubeFace, Flow, GetArmPoseEvent, Hand, Hooks, InputKeyEvent,
+    self, ArmPose, BlockEntityDrawContext, CameraShakeEvent, ClientHost, ClientTickPostEvent,
+    Command, CommandEvent, Corner, CubeFace, Flow, GetArmPoseEvent, Hand, Hooks, InputKeyEvent,
     ItemStack, KeyAction, KeyConflictContext, KeyRegistration, PlayerLoggedInEvent,
     RegisterClientCommandsEvent, RegisterCommandsEvent, Registrar, RegistrationContext,
     RenderArmEvent, RenderGuiPostEvent, RenderHandEvent, RenderPlayerPreEvent, RunModCommandEvent,
-    ServerHost, ServerTickEvent, SettingChangedEvent, SettingSpec, Text, UseAnimation,
+    ScreenClosingEvent, ScreenMouseButtonPressedPreEvent, ScreenMouseScrolledPreEvent,
+    ScreenRenderPostEvent, ServerHost, ServerTickEvent, SettingChangedEvent, SettingSpec, Text,
+    UseAnimation,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -97,9 +98,10 @@ fn http_download_file(url: &str, dest: &PathBuf) -> Result<u16, String> {
     Ok(code)
 }
 
-const ID: &str = "ysm_models";
+pub(crate) const ID: &str = "ysm_models";
 const KEY_CYCLE_MODEL: &str = "cycle_model";
 const KEY_CYCLE_GESTURE: &str = "cycle_gesture";
+const KEY_OPEN_GUI: &str = "open_gui";
 
 pub struct PersonaSpec {
     pub id: &'static str,
@@ -269,8 +271,8 @@ pub const GESTURES: [&str; 8] = [
 const REACH_CHOICES: [&str; 4] = ["16 blocks", "32 blocks", "64 blocks (Default)", "128 blocks"];
 const BOOL_CHOICES: [&str; 2] = ["Enabled", "Disabled"];
 
-static PERSONA_IDX: AtomicU32 = AtomicU32::new(0);
-static GESTURE_IDX: AtomicU32 = AtomicU32::new(0);
+pub(crate) static PERSONA_IDX: AtomicU32 = AtomicU32::new(0);
+pub(crate) static GESTURE_IDX: AtomicU32 = AtomicU32::new(0);
 static ARMOR_AUTO_HIDE: AtomicU32 = AtomicU32::new(0);
 static FIRST_PERSON_ARM: AtomicU32 = AtomicU32::new(0);
 static HUD_OVERLAY: AtomicU32 = AtomicU32::new(0);
@@ -282,8 +284,8 @@ static LOCAL_HELD_CAT: AtomicU32 = AtomicU32::new(0);
 static LOCAL_USE_KIND: AtomicU32 = AtomicU32::new(0);
 static LOCAL_HAND_SWING: AtomicBool = AtomicBool::new(false);
 static LOCAL_RIDING: AtomicBool = AtomicBool::new(false);
-static NAMED_ANIM_IDX: AtomicU32 = AtomicU32::new(u32::MAX);
-static NAMED_ANIM_LABEL: OnceLock<Mutex<String>> = OnceLock::new();
+pub(crate) static NAMED_ANIM_IDX: AtomicU32 = AtomicU32::new(u32::MAX);
+pub(crate) static NAMED_ANIM_LABEL: OnceLock<Mutex<String>> = OnceLock::new();
 
 #[derive(Clone)]
 struct EntityHeld {
@@ -360,7 +362,7 @@ fn state_name_to_idx(name: &str) -> u32 {
         .unwrap_or(0) as u32
 }
 
-fn sync_state_to_disk(p_idx: usize, g_idx: usize) {
+pub(crate) fn sync_state_to_disk(p_idx: usize, g_idx: usize) {
     let p = &PERSONAS[p_idx % PERSONAS.len()];
     let g = GESTURES[g_idx % GESTURES.len()];
     let dir = PathBuf::from("horizon-mods/.horizon-mod-data/ysm_models");
@@ -441,7 +443,7 @@ struct BakedModel {
     groups: [BakedGroup; 6],
 }
 
-const MODEL_SPECS: [(&str, &str); 9] = [
+pub(crate) const MODEL_SPECS: [(&str, &str); 9] = [
     ("claude_ojousama", "ysm_models:entity/claude_ojousama"),
     ("claude_butterfly", "ysm_models:entity/claude_butterfly"),
     ("deepseek_whale", "ysm_models:entity/deepseek_whale"),
@@ -811,6 +813,11 @@ impl Hooks for YsmModelsMod {
                 .label("key.ysm_models.cycle_gesture")
                 .context(KeyConflictContext::InGame),
         );
+        r.register_key_mapping(
+            KeyRegistration::new(KEY_OPEN_GUI, "key.keyboard.o")
+                .label("key.ysm_models.open_gui")
+                .context(KeyConflictContext::InGame),
+        );
         sync_state_to_disk(0, 0);
     }
 
@@ -827,6 +834,8 @@ impl Hooks for YsmModelsMod {
         event.commands.push(Command::new("ysm_anims"));
         event.commands.push(Command::new("ysm_list"));
         event.commands.push(Command::new("ysm_stop"));
+        event.commands.push(Command::new("ysm_gui"));
+        event.commands.push(Command::new("ysm_menu"));
         event.commands.push(Command::new("ysm_sources"));
         event.commands.push(Command::new("ysm_add_source"));
         event.commands.push(Command::new("ysm_token"));
@@ -853,6 +862,9 @@ impl Hooks for YsmModelsMod {
             return Flow::Cancel;
         } else if cmd == "ysm_gesture" || cmd == "ysm gesture" {
             cycle_gesture(host);
+            return Flow::Cancel;
+        } else if cmd == "ysm_gui" || cmd == "ysm_menu" {
+            let _ = gui::open_ysm_gui(host);
             return Flow::Cancel;
         } else if cmd == "ysm_stop" {
             NAMED_ANIM_IDX.store(u32::MAX, Ordering::Relaxed);
@@ -1096,6 +1108,8 @@ impl Hooks for YsmModelsMod {
             cycle_model(host);
         } else if event.key == "key.keyboard.g" && !host.is_down(ID, KEY_CYCLE_GESTURE) {
             cycle_gesture(host);
+        } else if event.key == "key.keyboard.o" && !host.is_down(ID, KEY_OPEN_GUI) {
+            let _ = gui::open_ysm_gui(host);
         }
     }
 
@@ -1127,6 +1141,9 @@ impl Hooks for YsmModelsMod {
         }
         while host.consume_click(ID, KEY_CYCLE_GESTURE) {
             cycle_gesture(host);
+        }
+        while host.consume_click(ID, KEY_OPEN_GUI) {
+            let _ = gui::open_ysm_gui(host);
         }
     }
 
@@ -1350,7 +1367,7 @@ impl Hooks for YsmModelsMod {
             String::new()
         };
         let line1 = format!(
-            "[YSM 3D] {} ({}骨/{}块) [Y切换 /ysm_anims]",
+            "[YSM 3D] {} ({}骨/{}块) [O预览 / Y切换]",
             p.short_title, p.bones_count, p.cubes_count
         );
         let line2 = if !custom_label.is_empty() {
@@ -1366,5 +1383,31 @@ impl Hooks for YsmModelsMod {
         draw.fill([x, y, 2.0, h], 0xFF00_0000 | p.primary_rgb);
         draw.text(&line1, [x + 5.0, y + 2.0], 0xFFFF_D700, true);
         draw.text(&line2, [x + 5.0, y + 13.0], 0xFFE0_F2FE, true);
+    }
+
+    fn screen_render_post(&self, host: &dyn ClientHost, event: &mut ScreenRenderPostEvent<'_>) {
+        gui::render_ysm_gui(host, event);
+    }
+
+    fn screen_mouse_button_pressed_pre(
+        &self,
+        host: &dyn ClientHost,
+        event: &mut ScreenMouseButtonPressedPreEvent<'_>,
+    ) -> Flow {
+        let _ = gui::handle_mouse_click(host, event);
+        Flow::Continue
+    }
+
+    fn screen_mouse_scrolled_pre(
+        &self,
+        host: &dyn ClientHost,
+        event: &mut ScreenMouseScrolledPreEvent<'_>,
+    ) -> Flow {
+        let _ = gui::handle_mouse_scroll(host, event);
+        Flow::Continue
+    }
+
+    fn screen_closing(&self, host: &dyn ClientHost, _event: &mut ScreenClosingEvent<'_>) {
+        gui::on_screen_closing(host);
     }
 }
