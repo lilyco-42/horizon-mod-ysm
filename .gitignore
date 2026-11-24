@@ -1,0 +1,10 @@
+target/
+*.hmod
+*.log
+*.ytree
+*.yanim
+*.ysm
+*.bin
+.env
+.DS_Store
+__pycache__/
