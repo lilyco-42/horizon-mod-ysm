@@ -10,7 +10,12 @@ use mod_api::{BlockEntityDrawContext, ItemDisplayContext, ItemStack, MobRender};
 
 const MODEL_UNIT: f32 = 1.0 / 16.0;
 const YTREE_MAGIC: &[u8; 4] = b"YTR1";
-const YANIM_MAGIC: &[u8; 4] = b"YAN1";
+const YANIM_MAGIC_V1: &[u8; 4] = b"YAN1";
+const YANIM_MAGIC_V2: &[u8; 4] = b"YAN2";
+
+const LOOP_ONCE: u8 = 0;
+const LOOP_REPEAT: u8 = 1;
+const LOOP_HOLD_LAST: u8 = 2;
 
 const SLOT_PRE_PARALLEL: usize = 0;
 const SLOT_IDLE: usize = 1;
@@ -215,8 +220,10 @@ struct AnimTrack {
 }
 
 struct AnimSlot {
+    loop_mode: u8,
     length: f32,
     frame_count: usize,
+    has_rot_motion: bool,
     tracks: Vec<AnimTrack>,
 }
 
@@ -225,6 +232,34 @@ pub struct YTreeModel {
     scale: f32,
     bones: Vec<TreeBone>,
     slots: [Option<AnimSlot>; TOTAL_SLOTS],
+    named: Vec<(String, AnimSlot)>,
+}
+
+impl YTreeModel {
+    pub fn animation_names(&self) -> Vec<&str> {
+        self.named.iter().map(|(n, _)| n.as_str()).collect()
+    }
+
+    pub fn find_animation(&self, query: &str) -> Option<(usize, &str)> {
+        let q = query.trim();
+        if q.is_empty() {
+            return None;
+        }
+        if let Ok(idx) = q.parse::<usize>() {
+            if idx >= 1 && idx <= self.named.len() {
+                return Some((idx - 1, self.named[idx - 1].0.as_str()));
+            }
+        }
+        let ql = q.to_ascii_lowercase();
+        if let Some((i, (n, _))) = self.named.iter().enumerate().find(|(_, (n, _))| n.eq_ignore_ascii_case(&ql)) {
+            return Some((i, n.as_str()));
+        }
+        self.named
+            .iter()
+            .enumerate()
+            .find(|(_, (n, _))| n.to_ascii_lowercase().contains(&ql))
+            .map(|(i, (n, _))| (i, n.as_str()))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -331,45 +366,92 @@ fn load_file(slug: &str, ext: &str) -> Option<Vec<u8>> {
     None
 }
 
-fn decode_yanim(b: &[u8]) -> [Option<AnimSlot>; TOTAL_SLOTS] {
+fn decode_anim_payload(b: &[u8], off: &mut usize, loop_mode: u8) -> Option<AnimSlot> {
+    let length = read_f32(b, off)?;
+    let frame_count = read_u16(b, off)? as usize;
+    let track_count = read_u16(b, off)? as usize;
+    let mut tracks = Vec::with_capacity(track_count);
+    let mut max_rot_delta = 0.0f32;
+    for _ in 0..track_count {
+        let bone_index = read_u16(b, off)? as usize;
+        let flags = *b.get(*off)?;
+        *off += 1;
+        let mut rot: Vec<Vec3> = if (flags & FLAG_ROT) != 0 { Vec::with_capacity(frame_count) } else { Vec::new() };
+        let mut pos: Vec<Vec3> = if (flags & FLAG_POS) != 0 { Vec::with_capacity(frame_count) } else { Vec::new() };
+        let mut scale: Vec<Vec3> = if (flags & FLAG_SCALE) != 0 { Vec::with_capacity(frame_count) } else { Vec::new() };
+        for _ in 0..frame_count {
+            if (flags & FLAG_ROT) != 0 {
+                if let Some(v) = read_vec3(b, off) {
+                    if let Some(first) = rot.first() {
+                        max_rot_delta = max_rot_delta
+                            .max((v[0] - first[0]).abs())
+                            .max((v[1] - first[1]).abs())
+                            .max((v[2] - first[2]).abs());
+                    }
+                    rot.push(v);
+                }
+            }
+            if (flags & FLAG_POS) != 0 {
+                if let Some(v) = read_vec3(b, off) { pos.push(v); }
+            }
+            if (flags & FLAG_SCALE) != 0 {
+                if let Some(v) = read_vec3(b, off) { scale.push(v); }
+            }
+        }
+        tracks.push(AnimTrack { bone_index, flags, rot, pos, scale });
+    }
+    Some(AnimSlot {
+        loop_mode,
+        length,
+        frame_count,
+        has_rot_motion: max_rot_delta > 0.05,
+        tracks,
+    })
+}
+
+fn decode_yanim(b: &[u8]) -> ([Option<AnimSlot>; TOTAL_SLOTS], Vec<(String, AnimSlot)>) {
     let mut slots: [Option<AnimSlot>; TOTAL_SLOTS] = std::array::from_fn(|_| None);
-    if b.len() < 5 || &b[0..4] != YANIM_MAGIC {
-        return slots;
+    let mut named: Vec<(String, AnimSlot)> = Vec::new();
+    if b.len() < 5 {
+        return (slots, named);
+    }
+    let is_v2 = &b[0..4] == YANIM_MAGIC_V2;
+    if !is_v2 && &b[0..4] != YANIM_MAGIC_V1 {
+        return (slots, named);
     }
     let slot_count = b[4] as usize;
     let mut off = 5usize;
     for _ in 0..slot_count {
         let Some(&slot_id) = b.get(off) else { break };
         off += 1;
-        let Some(length) = read_f32(b, &mut off) else { break };
-        let Some(frame_count) = read_u16(b, &mut off).map(|v| v as usize) else { break };
-        let Some(track_count) = read_u16(b, &mut off).map(|v| v as usize) else { break };
-        let mut tracks = Vec::with_capacity(track_count);
-        for _ in 0..track_count {
-            let Some(bone_index) = read_u16(b, &mut off).map(|v| v as usize) else { break };
-            let Some(&flags) = b.get(off) else { break };
+        let loop_mode = if is_v2 {
+            let Some(&lm) = b.get(off) else { break };
             off += 1;
-            let mut rot = if (flags & FLAG_ROT) != 0 { Vec::with_capacity(frame_count) } else { Vec::new() };
-            let mut pos = if (flags & FLAG_POS) != 0 { Vec::with_capacity(frame_count) } else { Vec::new() };
-            let mut scale = if (flags & FLAG_SCALE) != 0 { Vec::with_capacity(frame_count) } else { Vec::new() };
-            for _ in 0..frame_count {
-                if (flags & FLAG_ROT) != 0 {
-                    if let Some(v) = read_vec3(b, &mut off) { rot.push(v); }
-                }
-                if (flags & FLAG_POS) != 0 {
-                    if let Some(v) = read_vec3(b, &mut off) { pos.push(v); }
-                }
-                if (flags & FLAG_SCALE) != 0 {
-                    if let Some(v) = read_vec3(b, &mut off) { scale.push(v); }
-                }
-            }
-            tracks.push(AnimTrack { bone_index, flags, rot, pos, scale });
-        }
+            lm
+        } else {
+            LOOP_REPEAT
+        };
+        let Some(slot) = decode_anim_payload(b, &mut off, loop_mode) else { break };
         if (slot_id as usize) < TOTAL_SLOTS {
-            slots[slot_id as usize] = Some(AnimSlot { length, frame_count, tracks });
+            slots[slot_id as usize] = Some(slot);
         }
     }
-    slots
+    if is_v2 {
+        if let Some(named_count) = read_u16(b, &mut off).map(|v| v as usize) {
+            named.reserve(named_count);
+            for _ in 0..named_count {
+                let Some(&nlen) = b.get(off) else { break };
+                off += 1;
+                let Some(name) = b.get(off..off + nlen as usize).and_then(|s| std::str::from_utf8(s).ok()) else { break };
+                off += nlen as usize;
+                let Some(&loop_mode) = b.get(off) else { break };
+                off += 1;
+                let Some(slot) = decode_anim_payload(b, &mut off, loop_mode) else { break };
+                named.push((name.to_string(), slot));
+            }
+        }
+    }
+    (slots, named)
 }
 
 fn decode_ytree(slug: &str, sprite: &'static str, b: &[u8]) -> Option<YTreeModel> {
@@ -425,10 +507,10 @@ fn decode_ytree(slug: &str, sprite: &'static str, b: &[u8]) -> Option<YTreeModel
             quads,
         });
     }
-    let slots = load_file(slug, "yanim")
+    let (slots, named) = load_file(slug, "yanim")
         .map(|yb| decode_yanim(&yb))
-        .unwrap_or_else(|| std::array::from_fn(|_| None));
-    Some(YTreeModel { sprite, scale, bones, slots })
+        .unwrap_or_else(|| (std::array::from_fn(|_| None), Vec::new()));
+    Some(YTreeModel { sprite, scale, bones, slots, named })
 }
 
 static YTREE_CACHE: OnceLock<Vec<Option<YTreeModel>>> = OnceLock::new();
@@ -771,6 +853,7 @@ pub fn draw_ytree_model(
     draw: &mut dyn BlockEntityDrawContext,
     model: &YTreeModel,
     g_idx: usize,
+    named_anim_idx: Option<usize>,
     player: &MobRender<'_>,
     local: bool,
     riding: bool,
@@ -810,12 +893,22 @@ pub fn draw_ytree_model(
         apply_slot(pre, time_sec, &mut attrs, false, true);
     }
 
-    // Layer 1: Primary animation state (official `AnimationRegister.java` priority + `G` extra gestures!)
-    let active_gesture =
-        g_idx > 0 && !riding && !is_moving && !crouching && !in_air && player.hurt_time == 0;
+    // Layer 1: Primary animation state (custom `/ysm_play <name>` > `G` extra gesture > official locomotion priority!)
+    let active_named = named_anim_idx.and_then(|i| model.named.get(i));
+    let active_gesture = active_named.is_none()
+        && g_idx > 0
+        && !riding
+        && !is_moving
+        && !crouching
+        && !in_air
+        && player.hurt_time == 0;
     let state_name: &'static str;
 
-    if active_gesture {
+    if let Some((_, clip)) = active_named {
+        state_name = "custom";
+        let hold_last = clip.loop_mode == LOOP_HOLD_LAST;
+        apply_slot(clip, time_sec, &mut attrs, false, hold_last);
+    } else if active_gesture {
         let extra_slot = (SLOT_EXTRA_BASE + g_idx).min(SLOT_HOLD_SWORD - 1);
         state_name = match g_idx {
             1 => "extra1/wave",
@@ -871,7 +964,7 @@ pub fn draw_ytree_model(
     // Per official YSM InnerClassify.java, plain blocks / unclassified items return EMPTY (no forced raised-arm pose);
     // and `hold_mainhand:sword / bow / pickaxe / shield` + `use_mainhand:bow` use Bedrock `hold_on_last_frame`
     // (play draw transition ONCE then hold steady on the final frame instead of looping!).
-    let arm_slot = if active_gesture {
+    let arm_slot = if active_gesture || active_named.is_some() {
         None
     } else {
         match use_kind {
@@ -1000,7 +1093,7 @@ pub fn draw_ytree_model(
             } else if let Some(cache) = guard.as_mut() {
                 let dt = (time_sec - cache.last_time).clamp(0.0, 0.1);
                 cache.last_time = time_sec;
-                if swinging && (!cache.was_swinging || (time_sec - cache.swing_start) > 0.28) {
+                if swinging && (!cache.was_swinging || (time_sec - cache.swing_start) > 0.36) {
                     cache.swing_start = time_sec;
                 }
                 cache.was_swinging = swinging;
@@ -1024,13 +1117,13 @@ pub fn draw_ytree_model(
                     }
                 }
 
-                // Real YSM `swing:sword` / `sword_attack_01` clip OR additive slash swing (0.28s)
+                // Real YSM `swing:sword` / `sword_attack_01` clip (with `v.qh=1`) OR additive slash swing (0.36s)
                 let swing_age = time_sec - cache.swing_start;
-                if (0.0..0.28).contains(&swing_age) {
-                    if let Some(ref swing_clip) = model.slots[SLOT_SWING] {
+                if (0.0..0.36).contains(&swing_age) {
+                    if let Some(ref swing_clip) = model.slots[SLOT_SWING].as_ref().filter(|c| c.has_rot_motion) {
                         apply_slot(swing_clip, swing_age, &mut attrs, false, true);
                     } else {
-                        let p = swing_age / 0.28;
+                        let p = swing_age / 0.36;
                         let swing = (p * std::f32::consts::PI).sin();
                         for (i, bone) in model.bones.iter().enumerate() {
                             match bone.role {

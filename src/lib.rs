@@ -282,6 +282,8 @@ static LOCAL_HELD_CAT: AtomicU32 = AtomicU32::new(0);
 static LOCAL_USE_KIND: AtomicU32 = AtomicU32::new(0);
 static LOCAL_HAND_SWING: AtomicBool = AtomicBool::new(false);
 static LOCAL_RIDING: AtomicBool = AtomicBool::new(false);
+static NAMED_ANIM_IDX: AtomicU32 = AtomicU32::new(u32::MAX);
+static NAMED_ANIM_LABEL: OnceLock<Mutex<String>> = OnceLock::new();
 
 #[derive(Clone)]
 struct EntityHeld {
@@ -391,6 +393,7 @@ fn resolve_player_persona(name: &str, local: bool) -> usize {
 fn cycle_model(host: &mut dyn ClientHost) {
     let next = (PERSONA_IDX.load(Ordering::Relaxed) as usize + 1) % PERSONAS.len();
     PERSONA_IDX.store(next as u32, Ordering::Relaxed);
+    NAMED_ANIM_IDX.store(u32::MAX, Ordering::Relaxed);
     host.set_setting(ID, "persona", &next.to_string());
     let g = GESTURE_IDX.load(Ordering::Relaxed) as usize;
     sync_state_to_disk(next, g);
@@ -407,6 +410,7 @@ fn cycle_model(host: &mut dyn ClientHost) {
 }
 
 fn cycle_gesture(host: &mut dyn ClientHost) {
+    NAMED_ANIM_IDX.store(u32::MAX, Ordering::Relaxed);
     let next_g = (GESTURE_IDX.load(Ordering::Relaxed) as usize + 1) % GESTURES.len();
     GESTURE_IDX.store(next_g as u32, Ordering::Relaxed);
     host.set_setting(ID, "gesture", &next_g.to_string());
@@ -820,6 +824,9 @@ impl Hooks for YsmModelsMod {
         event.commands.push(Command::new("ysm_gesture"));
         event.commands.push(Command::new("ysm_play"));
         event.commands.push(Command::new("ysm_action"));
+        event.commands.push(Command::new("ysm_anims"));
+        event.commands.push(Command::new("ysm_list"));
+        event.commands.push(Command::new("ysm_stop"));
         event.commands.push(Command::new("ysm_sources"));
         event.commands.push(Command::new("ysm_add_source"));
         event.commands.push(Command::new("ysm_token"));
@@ -847,12 +854,68 @@ impl Hooks for YsmModelsMod {
         } else if cmd == "ysm_gesture" || cmd == "ysm gesture" {
             cycle_gesture(host);
             return Flow::Cancel;
+        } else if cmd == "ysm_stop" {
+            NAMED_ANIM_IDX.store(u32::MAX, Ordering::Relaxed);
+            GESTURE_IDX.store(0, Ordering::Relaxed);
+            let _ = host.chat_line(Text::literal("§b[YSM 3D]§r 已恢复自动动作状态机 (idle/walk/run/sneak/ride)"));
+            return Flow::Cancel;
+        } else if cmd == "ysm_anims" || cmd == "ysm_list" || cmd.starts_with("ysm_anims ") || cmd.starts_with("ysm_list ") {
+            let filter = cmd
+                .strip_prefix("ysm_anims")
+                .or_else(|| cmd.strip_prefix("ysm_list"))
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            let p_idx = PERSONA_IDX.load(Ordering::Relaxed) as usize % PERSONAS.len();
+            let ytrees = ytree_engine::get_ytree_models(&MODEL_SPECS);
+            if let Some(Some(ytree)) = ytrees.get(p_idx % ytrees.len()) {
+                let all = ytree.animation_names();
+                let matched: Vec<String> = all
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, n)| filter.is_empty() || n.to_ascii_lowercase().contains(&filter))
+                    .take(40)
+                    .map(|(i, n)| format!("{}:{}", i + 1, n))
+                    .collect();
+                let _ = host.chat_line(Text::literal(format!(
+                    "§6[YSM 动画库]§r §e{}§r 共加载 §a{}§r 个动画 (匹配显示 {} 个): §f{}§r | 播放: §b/ysm_play <动画名或序号>§r | 停止: §b/ysm_stop§r",
+                    PERSONAS[p_idx].short_title,
+                    all.len(),
+                    matched.len(),
+                    matched.join(", ")
+                )));
+            }
+            return Flow::Cancel;
         } else if let Some(rest) = cmd.strip_prefix("ysm_play ").or_else(|| cmd.strip_prefix("ysm_action ")) {
-            if let Ok(idx) = rest.trim().parse::<usize>() {
+            let q = rest.trim();
+            let p_idx = PERSONA_IDX.load(Ordering::Relaxed) as usize % PERSONAS.len();
+            if q == "0" || q.eq_ignore_ascii_case("stop") || q.eq_ignore_ascii_case("auto") {
+                NAMED_ANIM_IDX.store(u32::MAX, Ordering::Relaxed);
+                GESTURE_IDX.store(0, Ordering::Relaxed);
+                let _ = host.chat_line(Text::literal("§b[YSM 3D]§r 已恢复自动动作状态机"));
+                return Flow::Cancel;
+            }
+            let ytrees = ytree_engine::get_ytree_models(&MODEL_SPECS);
+            if let Some(Some(ytree)) = ytrees.get(p_idx % ytrees.len()) {
+                if let Some((idx, name)) = ytree.find_animation(q) {
+                    NAMED_ANIM_IDX.store(idx as u32, Ordering::Relaxed);
+                    if let Ok(mut s) = NAMED_ANIM_LABEL.get_or_init(|| Mutex::new(String::new())).lock() {
+                        *s = name.to_string();
+                    }
+                    let _ = host.chat_line(Text::literal(format!(
+                        "§b[YSM 动画播放]§r §e{}§r -> §a#{}: {}§r (输入 §b/ysm_stop§r 恢复自动)",
+                        PERSONAS[p_idx].short_title,
+                        idx + 1,
+                        name
+                    )));
+                    return Flow::Cancel;
+                }
+            }
+            if let Ok(idx) = q.parse::<usize>() {
+                NAMED_ANIM_IDX.store(u32::MAX, Ordering::Relaxed);
                 let g = idx % GESTURES.len();
                 GESTURE_IDX.store(g as u32, Ordering::Relaxed);
                 host.set_setting(ID, "gesture", &g.to_string());
-                let p_idx = PERSONA_IDX.load(Ordering::Relaxed) as usize % PERSONAS.len();
                 sync_state_to_disk(p_idx, g);
                 let _ = host.chat_line(Text::literal(format!(
                     "§b[YSM 3D]§r 切换动作 ({}/{}): §a{}§r -> §f{}",
@@ -860,6 +923,10 @@ impl Hooks for YsmModelsMod {
                     GESTURES.len(),
                     PERSONAS[p_idx].short_title,
                     GESTURES[g]
+                )));
+            } else {
+                let _ = host.chat_line(Text::literal(format!(
+                    "§c[YSM 动画]§r 未找到匹配 \"{q}\" 的动画，请先输入 §b/ysm_anims§r 查看当前模型全部动画"
                 )));
             }
             return Flow::Cancel;
@@ -1174,11 +1241,18 @@ impl Hooks for YsmModelsMod {
         }
 
         let ytrees = ytree_engine::get_ytree_models(&MODEL_SPECS);
+        let named_raw = NAMED_ANIM_IDX.load(Ordering::Relaxed);
+        let named_idx = if event.who.local && named_raw != u32::MAX {
+            Some(named_raw as usize)
+        } else {
+            None
+        };
         let drew = if let Some(Some(ytree)) = ytrees.get(p_idx % ytrees.len()) {
             let (ok, state) = ytree_engine::draw_ytree_model(
                 event.draw,
                 ytree,
                 g_idx,
+                named_idx,
                 event.player,
                 event.who.local,
                 riding,
@@ -1265,11 +1339,25 @@ impl Hooks for YsmModelsMod {
             .copied()
             .unwrap_or("idle");
         let held_label = ytree_engine::HeldCat::from_u8(LOCAL_HELD_CAT.load(Ordering::Relaxed) as u8).label();
+        let named_raw = NAMED_ANIM_IDX.load(Ordering::Relaxed);
+        let custom_label = if named_raw != u32::MAX {
+            NAMED_ANIM_LABEL
+                .get()
+                .and_then(|m| m.lock().ok())
+                .map(|s| s.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         let line1 = format!(
-            "[YSM 3D] {} ({}骨/{}块) [Y切换]",
+            "[YSM 3D] {} ({}骨/{}块) [Y切换 /ysm_anims]",
             p.short_title, p.bones_count, p.cubes_count
         );
-        let line2 = format!("实时: {} | 手持: {} | 姿势: {} [G切换]", live_state, held_label, GESTURES[g_idx]);
+        let line2 = if !custom_label.is_empty() {
+            format!("播放动画: {} | 手持: {} [/ysm_stop]", custom_label, held_label)
+        } else {
+            format!("实时: {} | 手持: {} | 姿势: {} [G切换]", live_state, held_label, GESTURES[g_idx])
+        };
         let draw = &mut *event.draw;
         let w = draw.text_width(&line1).max(draw.text_width(&line2)) + 8.0;
         let h = 24.0;
