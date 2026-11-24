@@ -1,6 +1,6 @@
 id = "ysm_models"
 name = "Yes Steve Model (YSM 3D Character Engine)"
-version = "3.5.0"
+version = "3.6.0"
 description = "100% YSM/CPM 3D character geometry, bone animations, expression/gesture wheel (Y/G keys), armor auto-hide, 1st-person 3D arm & multiplayer sync for Claude, DeepSeek, ChatGPT, Gemini."
 authors = ["MC-AI-Horizon"]
 license = "MIT"

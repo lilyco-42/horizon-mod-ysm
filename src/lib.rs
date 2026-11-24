@@ -1139,7 +1139,7 @@ impl Hooks for YsmModelsMod {
             && (mapping_down(host, "key.sprint") || host.is_key_down("key.keyboard.left.control"));
         let jumping = event.who.local
             && (mapping_down(host, "key.jump") || host.is_key_down("key.keyboard.space"));
-        let swinging = event.who.local
+        let mut swinging = event.who.local
             && (mapping_down(host, "key.attack")
                 || host.is_key_down("key.mouse.left")
                 || LOCAL_HAND_SWING.swap(false, Ordering::Relaxed));
@@ -1154,6 +1154,12 @@ impl Hooks for YsmModelsMod {
             .map(|h| (h.cat, h.use_kind, h.main_stack, h.off_stack))
             .unwrap_or((ytree_engine::HeldCat::Empty, ytree_engine::UseKind::None, None, None));
         if event.who.local {
+            // Casting a fishing rod with right-click triggers the cast swing animation
+            if held_cat == ytree_engine::HeldCat::Fishing
+                && (mapping_down(host, "key.use") || host.is_key_down("key.mouse.right"))
+            {
+                swinging = true;
+            }
             if use_kind == ytree_engine::UseKind::None && host.local_item_use().is_some() {
                 use_kind = match held_cat {
                     ytree_engine::HeldCat::Bow | ytree_engine::HeldCat::Crossbow => {

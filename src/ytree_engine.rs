@@ -859,16 +859,16 @@ pub fn draw_ytree_model(
         apply_slot(par, time_sec, &mut attrs, true);
     }
 
-    // Layer 2.5: Official YSM `arm.animation.json` held-item & item-use overlay!
-    // Overrides arm bones with the model's real hold_mainhand:* / use_mainhand:* clip
-    // (or clean procedural arm-hold fallback if the model omits that clip).
+    // Layer 2.5: Official YSM `ConditionalHold.java` + `ConditionalUse.java` (`arm.animation.json`)!
+    // Per official YSM InnerClassify.java, plain blocks / unclassified items return EMPTY (no forced raised-arm pose);
+    // their 3D item still renders in the hand while the arm animates naturally with idle/walk/run/sneak/ride.
     if !active_gesture {
         let arm_slot = match use_kind {
             UseKind::Bow => Some(SLOT_USE_BOW),
             UseKind::Eat => Some(SLOT_USE_EAT),
             UseKind::Block => Some(SLOT_HOLD_SHIELD),
             UseKind::None => match held_cat {
-                HeldCat::Empty => None,
+                HeldCat::Empty | HeldCat::Item => None,
                 HeldCat::Sword => Some(SLOT_HOLD_SWORD),
                 HeldCat::Bow => Some(SLOT_HOLD_BOW),
                 HeldCat::Crossbow => Some(SLOT_HOLD_CROSSBOW),
@@ -876,14 +876,13 @@ pub fn draw_ytree_model(
                 HeldCat::Shield => Some(SLOT_HOLD_SHIELD),
                 HeldCat::Fishing => Some(SLOT_HOLD_FISHING),
                 HeldCat::Spear => Some(SLOT_HOLD_SPEAR),
-                HeldCat::Item => Some(SLOT_HOLD_ITEM),
             },
         };
         if let Some(aslot) = arm_slot {
-            if let Some(ref clip) = model.slots[aslot].as_ref().or(model.slots[SLOT_HOLD_ITEM].as_ref()) {
+            if let Some(ref clip) = model.slots[aslot] {
                 apply_slot(clip, time_sec, &mut attrs, false);
             } else {
-                // Procedural held-item fallback on right arm (or two-handed bow/crossbow)
+                // Procedural fallback ONLY for classified weapons/tools/fishing rods when a model omits that clip
                 for (i, bone) in model.bones.iter().enumerate() {
                     match bone.role {
                         BoneRole::RightArm => {
@@ -893,10 +892,14 @@ pub fn draw_ytree_model(
                                 UseKind::Block => 0.95,
                                 UseKind::None => match held_cat {
                                     HeldCat::Bow | HeldCat::Crossbow => 1.25,
+                                    HeldCat::Fishing => 0.78 + (time_sec * 2.4).sin() * 0.06,
                                     _ => 0.45,
                                 },
                             };
-                            attrs[i].rot[1] = if use_kind == UseKind::Block { 0.45 } else { 0.12 };
+                            attrs[i].rot[1] = if use_kind == UseKind::Block { 0.45 } else { 0.10 };
+                        }
+                        BoneRole::RightForeArm if held_cat == HeldCat::Fishing => {
+                            attrs[i].rot[0] = 0.25;
                         }
                         BoneRole::LeftArm
                             if use_kind == UseKind::Bow
