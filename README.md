@@ -1,4 +1,4 @@
-# horizon-mod-ysm (`ysm_models` v3.6.0)
+# horizon-mod-ysm (`ysm_models` v3.6.1)
 
 Standalone **Horizon** native mod delivering a 1:1 Rust port of **Yes Steve Model** (`YesSteveModel-Native` + `YesSteveModel`, Apache-2.0).
 

@@ -450,12 +450,18 @@ fn lerp3(a: Vec3, b: Vec3, t: f32) -> Vec3 {
     ]
 }
 
-fn apply_slot(slot: &AnimSlot, time_sec: f32, attrs: &mut [BoneAttr], additive: bool) {
+fn apply_slot(slot: &AnimSlot, time_sec: f32, attrs: &mut [BoneAttr], additive: bool, hold_last: bool) {
     if slot.frame_count == 0 {
         return;
     }
     let (f0, f1, frac) = if slot.frame_count == 1 || slot.length <= 0.001 {
         (0, 0, 0.0)
+    } else if hold_last {
+        let local_t = time_sec.clamp(0.0, slot.length);
+        let pos = (local_t / slot.length) * (slot.frame_count - 1) as f32;
+        let i0 = (pos.floor() as usize).min(slot.frame_count - 1);
+        let i1 = (i0 + 1).min(slot.frame_count - 1);
+        (i0, i1, pos - i0 as f32)
     } else {
         let local_t = time_sec.rem_euclid(slot.length);
         let pos = (local_t / slot.length) * (slot.frame_count - 1) as f32;
@@ -750,6 +756,8 @@ struct BlendCache {
     last_time: f32,
     swing_start: f32,
     was_swinging: bool,
+    last_arm_slot: Option<usize>,
+    arm_slot_start: f32,
     attrs: Vec<BoneAttr>,
 }
 
@@ -799,7 +807,7 @@ pub fn draw_ytree_model(
 
     // Layer 0: `pre_parallel` (hides Gui wall, Kuang, ysmGlowLieFeng, hidden weapons/effects!)
     if let Some(ref pre) = model.slots[SLOT_PRE_PARALLEL] {
-        apply_slot(pre, time_sec, &mut attrs, false);
+        apply_slot(pre, time_sec, &mut attrs, false, true);
     }
 
     // Layer 1: Primary animation state (official `AnimationRegister.java` priority + `G` extra gestures!)
@@ -819,10 +827,10 @@ pub fn draw_ytree_model(
             _ => "extra7/victory",
         };
         if let Some(ref clip) = model.slots[extra_slot] {
-            apply_slot(clip, time_sec, &mut attrs, false);
+            apply_slot(clip, time_sec, &mut attrs, false, false);
         } else {
             if let Some(ref idle) = model.slots[SLOT_IDLE] {
-                apply_slot(idle, time_sec, &mut attrs, false);
+                apply_slot(idle, time_sec, &mut attrs, false, false);
             }
             apply_procedural_gesture(&model.bones, &mut attrs, g_idx, time_sec);
         }
@@ -846,7 +854,7 @@ pub fn draw_ytree_model(
         };
         state_name = sname;
         if let Some(ref clip) = model.slots[primary_slot] {
-            apply_slot(clip, time_sec, &mut attrs, false);
+            apply_slot(clip, time_sec, &mut attrs, false, false);
         } else {
             // Model's `main.animation.json` omitted this slot (e.g. controller-driven walk/sneak):
             // play smooth hierarchical bone-tree locomotion so every model animates naturally!
@@ -856,14 +864,17 @@ pub fn draw_ytree_model(
 
     // Layer 2: `parallel` (official blinking, hair physics, skirt physics)
     if let Some(ref par) = model.slots[SLOT_PARALLEL] {
-        apply_slot(par, time_sec, &mut attrs, true);
+        apply_slot(par, time_sec, &mut attrs, true, false);
     }
 
     // Layer 2.5: Official YSM `ConditionalHold.java` + `ConditionalUse.java` (`arm.animation.json`)!
     // Per official YSM InnerClassify.java, plain blocks / unclassified items return EMPTY (no forced raised-arm pose);
-    // their 3D item still renders in the hand while the arm animates naturally with idle/walk/run/sneak/ride.
-    if !active_gesture {
-        let arm_slot = match use_kind {
+    // and `hold_mainhand:sword / bow / pickaxe / shield` + `use_mainhand:bow` use Bedrock `hold_on_last_frame`
+    // (play draw transition ONCE then hold steady on the final frame instead of looping!).
+    let arm_slot = if active_gesture {
+        None
+    } else {
+        match use_kind {
             UseKind::Bow => Some(SLOT_USE_BOW),
             UseKind::Eat => Some(SLOT_USE_EAT),
             UseKind::Block => Some(SLOT_HOLD_SHIELD),
@@ -877,40 +888,70 @@ pub fn draw_ytree_model(
                 HeldCat::Fishing => Some(SLOT_HOLD_FISHING),
                 HeldCat::Spear => Some(SLOT_HOLD_SPEAR),
             },
-        };
-        if let Some(aslot) = arm_slot {
-            if let Some(ref clip) = model.slots[aslot] {
-                apply_slot(clip, time_sec, &mut attrs, false);
-            } else {
-                // Procedural fallback ONLY for classified weapons/tools/fishing rods when a model omits that clip
-                for (i, bone) in model.bones.iter().enumerate() {
-                    match bone.role {
-                        BoneRole::RightArm => {
-                            attrs[i].rot[0] = match use_kind {
-                                UseKind::Bow => 1.45,
-                                UseKind::Eat => 1.35 + (time_sec * 16.0).sin() * 0.15,
-                                UseKind::Block => 0.95,
-                                UseKind::None => match held_cat {
-                                    HeldCat::Bow | HeldCat::Crossbow => 1.25,
-                                    HeldCat::Fishing => 0.78 + (time_sec * 2.4).sin() * 0.06,
-                                    _ => 0.45,
-                                },
-                            };
-                            attrs[i].rot[1] = if use_kind == UseKind::Block { 0.45 } else { 0.10 };
+        }
+    };
+    if let Some(aslot) = arm_slot {
+        let hold_last = !matches!(aslot, SLOT_HOLD_FISHING | SLOT_USE_EAT);
+        let arm_time = if local && hold_last {
+            let lock = LOCAL_BLEND.get_or_init(|| Mutex::new(None));
+            lock.lock()
+                .ok()
+                .and_then(|mut g| {
+                    if let Some(c) = g.as_mut() {
+                        if c.last_arm_slot != Some(aslot) {
+                            c.last_arm_slot = Some(aslot);
+                            c.arm_slot_start = time_sec;
                         }
-                        BoneRole::RightForeArm if held_cat == HeldCat::Fishing => {
-                            attrs[i].rot[0] = 0.25;
-                        }
-                        BoneRole::LeftArm
-                            if use_kind == UseKind::Bow
-                                || held_cat == HeldCat::Bow
-                                || held_cat == HeldCat::Crossbow =>
-                        {
-                            attrs[i].rot[0] = 1.40;
-                            attrs[i].rot[1] = -0.35;
-                        }
-                        _ => {}
+                        Some((time_sec - c.arm_slot_start).max(0.0))
+                    } else {
+                        None
                     }
+                })
+                .unwrap_or(10.0)
+        } else if hold_last {
+            10.0
+        } else {
+            time_sec
+        };
+        if let Some(ref clip) = model.slots[aslot] {
+            apply_slot(clip, arm_time, &mut attrs, false, hold_last);
+        } else {
+            // Procedural fallback ONLY for classified weapons/tools/fishing rods when a model omits that clip
+            for (i, bone) in model.bones.iter().enumerate() {
+                match bone.role {
+                    BoneRole::RightArm => {
+                        attrs[i].rot[0] = match use_kind {
+                            UseKind::Bow => 1.45,
+                            UseKind::Eat => 1.35 + (time_sec * 16.0).sin() * 0.15,
+                            UseKind::Block => 0.95,
+                            UseKind::None => match held_cat {
+                                HeldCat::Bow | HeldCat::Crossbow => 1.25,
+                                HeldCat::Fishing => 0.78 + (time_sec * 2.4).sin() * 0.06,
+                                _ => 0.45,
+                            },
+                        };
+                        attrs[i].rot[1] = if use_kind == UseKind::Block { 0.45 } else { 0.10 };
+                    }
+                    BoneRole::RightForeArm if held_cat == HeldCat::Fishing => {
+                        attrs[i].rot[0] = 0.25;
+                    }
+                    BoneRole::LeftArm
+                        if use_kind == UseKind::Bow
+                            || held_cat == HeldCat::Bow
+                            || held_cat == HeldCat::Crossbow =>
+                    {
+                        attrs[i].rot[0] = 1.40;
+                        attrs[i].rot[1] = -0.35;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    } else if local {
+        if let Some(lock) = LOCAL_BLEND.get() {
+            if let Ok(mut g) = lock.lock() {
+                if let Some(c) = g.as_mut() {
+                    c.last_arm_slot = None;
                 }
             }
         }
@@ -952,6 +993,8 @@ pub fn draw_ytree_model(
                     last_time: time_sec,
                     swing_start: if swinging { time_sec } else { -10.0 },
                     was_swinging: swinging,
+                    last_arm_slot: arm_slot,
+                    arm_slot_start: time_sec,
                     attrs: attrs.clone(),
                 });
             } else if let Some(cache) = guard.as_mut() {
@@ -985,7 +1028,7 @@ pub fn draw_ytree_model(
                 let swing_age = time_sec - cache.swing_start;
                 if (0.0..0.28).contains(&swing_age) {
                     if let Some(ref swing_clip) = model.slots[SLOT_SWING] {
-                        apply_slot(swing_clip, swing_age, &mut attrs, false);
+                        apply_slot(swing_clip, swing_age, &mut attrs, false, true);
                     } else {
                         let p = swing_age / 0.28;
                         let swing = (p * std::f32::consts::PI).sin();
