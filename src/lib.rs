@@ -136,7 +136,7 @@ pub const PERSONAS: [PersonaSpec; 10] = [
         cubes_count: 968,
         bones: "Root,AllBody,UpBody,Head,hair_back,flower_hairpin,layered_skirt,rightArm,leftArm",
         anims: "idle,walk,swing_hand,ojousama_bow,read_book",
-        scale: [0.95, 0.95, 0.95],
+        scale: [1.014, 1.014, 1.014],
         hand_tint_offset: [0.02, -0.01, 0.0],
         primary_rgb: 0xFF8C24,
         accent_rgb: 0xFFF2D6,
@@ -151,7 +151,7 @@ pub const PERSONAS: [PersonaSpec; 10] = [
         cubes_count: 4237,
         bones: "NAllRoot,MAllBody,ButterFly,RightWingsA,LeftWingsA,evening_gown,ribbon_crown",
         anims: "idle,walk,butterfly_flutter,waltz_spin,curtsy",
-        scale: [0.96, 0.96, 0.96],
+        scale: [0.994, 0.994, 0.994],
         hand_tint_offset: [0.02, 0.0, 0.01],
         primary_rgb: 0xFFA53B,
         accent_rgb: 0x5E3BFF,
@@ -166,7 +166,7 @@ pub const PERSONAS: [PersonaSpec; 10] = [
         cubes_count: 1730,
         bones: "Root,MAllBody,AllBody,whale_fins,ahoge,whale_tail,ALLbowl,maid_skirt",
         anims: "idle,walk,whale_tail_wag,slacking_eat_rice,water_float",
-        scale: [0.94, 0.94, 0.94],
+        scale: [0.940, 0.940, 0.940],
         hand_tint_offset: [-0.01, -0.02, 0.02],
         primary_rgb: 0x2684FF,
         accent_rgb: 0xE6F4FF,
@@ -181,7 +181,7 @@ pub const PERSONAS: [PersonaSpec; 10] = [
         cubes_count: 694,
         bones: "Root,MAllBody,UpperBody,MoreUpperBody,Skirt,Ribbon3,whale_beret,twintails",
         anims: "idle,walk,blink_random,wall_touch,maid_wave",
-        scale: [0.94, 0.94, 0.94],
+        scale: [0.849, 0.849, 0.849],
         hand_tint_offset: [-0.01, -0.01, 0.01],
         primary_rgb: 0x3B9DFF,
         accent_rgb: 0xFFFFFF,
@@ -196,7 +196,7 @@ pub const PERSONAS: [PersonaSpec; 10] = [
         cubes_count: 1750,
         bones: "Root,Body_size,allcrystal,Mcrystal,ysmGlow_crystal_A,lynx_ears,medical_coat",
         anims: "idle,walk,crystal_halo_spin,senpai_nod,tactical_command",
-        scale: [0.98, 0.98, 0.98],
+        scale: [1.092, 1.092, 1.092],
         hand_tint_offset: [0.0, 0.01, -0.01],
         primary_rgb: 0x18B87A,
         accent_rgb: 0xE8F5EE,
@@ -211,7 +211,7 @@ pub const PERSONAS: [PersonaSpec; 10] = [
         cubes_count: 4081,
         bones: "ALL_root,dragon_root,dragon_horns,dragon_wings,dragon_tail,ysmGlow_claw",
         anims: "idle,walk,dragon_wing_spread,ender_breath,tail_sweep",
-        scale: [0.99, 0.99, 0.99],
+        scale: [1.114, 1.114, 1.114],
         hand_tint_offset: [0.0, 0.02, -0.01],
         primary_rgb: 0x8F2BFF,
         accent_rgb: 0x22222A,
@@ -226,7 +226,7 @@ pub const PERSONAS: [PersonaSpec; 10] = [
         cubes_count: 804,
         bones: "Root,MAllBody,UpBody,cat_ears,star_hairpin,Mtail,tail_A,tail_B,ribbon_bell",
         anims: "idle,walk,cat_ear_twitch,star_dance,cheshire_grin",
-        scale: [0.93, 0.93, 0.93],
+        scale: [1.152, 1.152, 1.152],
         hand_tint_offset: [0.01, 0.01, 0.02],
         primary_rgb: 0xA855F7,
         accent_rgb: 0xFFD966,
@@ -241,7 +241,7 @@ pub const PERSONAS: [PersonaSpec; 10] = [
         cubes_count: 1806,
         bones: "MRoot,MAllBody,AllHead,neko_ears,dual_tails_L,dual_tails_R,tech_jacket",
         anims: "idle,walk,dual_tail_wave,neko_pounce,victory_pose",
-        scale: [0.93, 0.93, 0.93],
+        scale: [0.986, 0.986, 0.986],
         hand_tint_offset: [0.01, 0.01, 0.01],
         primary_rgb: 0xFF4D94,
         accent_rgb: 0x38BDF8,
@@ -256,7 +256,7 @@ pub const PERSONAS: [PersonaSpec; 10] = [
         cubes_count: 126,
         bones: "Root,Body,Head,Hair,RightArm,LeftArm,RightLeg,LeftLeg",
         anims: "idle,walk,wave,cheer",
-        scale: [0.95, 0.95, 0.95],
+        scale: [1.000, 1.000, 1.000],
         hand_tint_offset: [0.0, 0.0, 0.0],
         primary_rgb: 0x38BDF8,
         accent_rgb: 0xF8FAFC,
@@ -271,7 +271,7 @@ pub const PERSONAS: [PersonaSpec; 10] = [
         cubes_count: 8742,
         bones: "Root,AllBody,Head,Hair,RightArm,LeftArm,RightLeg,LeftLeg",
         anims: "idle,walk,extra0,dance",
-        scale: [0.98, 0.98, 0.98],
+        scale: [1.034, 1.034, 1.034],
         hand_tint_offset: [0.0, 0.0, 0.0],
         primary_rgb: 0xF472B6,
         accent_rgb: 0xFFFFFF,
@@ -1705,10 +1705,10 @@ impl Hooks for YsmModelsMod {
         // 蓝色鲸鱼娘整体明显偏大 -> 整体再缩；其余“娘”系整体接近正常，只有头偏大 -> 只缩 Head 骨骼。
         let persona = &PERSONAS[p_idx % PERSONAS.len()];
         let pct = (RENDER_SCALE_PCT.load(Ordering::Relaxed) as f32 / 100.0).clamp(0.3, 3.0);
-        let is_whale = persona.title.contains("鲸鱼娘");
-        let is_niang = persona.title.contains('娘');
-        let title_bonus = if is_whale { 0.60 } else if is_niang { 0.92 } else { 1.0 };
-        let head_bonus = if is_whale { 0.90 } else if is_niang { 0.72 } else { 1.0 };
+        // 尺寸来自原版 ysm.json 的 width_scale/height_scale：bake 已归一化到 1.8m，
+        // 因此运行时系数 = height_scale / baked_scale，还原作者的绝对尺寸。
+        let title_bonus = 1.0f32;
+        let head_bonus = 1.0f32;
         let s = [
             (persona.scale[0] * pct * title_bonus).clamp(0.2, 3.0),
             (persona.scale[1] * pct * title_bonus).clamp(0.2, 3.0),
