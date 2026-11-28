@@ -309,6 +309,11 @@ static LOCAL_HELD_CAT: AtomicU32 = AtomicU32::new(0);
 static LOCAL_USE_KIND: AtomicU32 = AtomicU32::new(0);
 static LOCAL_HAND_SWING: AtomicBool = AtomicBool::new(false);
 static LOCAL_OFF_SWING: AtomicBool = AtomicBool::new(false);
+// 放置方块/使用物品的右键动作：右键按下沿触发一次挥臂（MC 放置会 swingHand）。
+static LOCAL_PLACE_SWING: AtomicBool = AtomicBool::new(false);
+static LAST_RIGHT_DOWN: AtomicBool = AtomicBool::new(false);
+// 全局模型渲染缩放百分比（50..200），`ysm_scale <百分比>` 实时调整。
+static RENDER_SCALE_PCT: AtomicU32 = AtomicU32::new(100);
 static LOCAL_RIDING: AtomicBool = AtomicBool::new(false);
 static LOCAL_IN_BOAT: AtomicBool = AtomicBool::new(false);
 static LOCAL_SLEEPING_SRV: AtomicBool = AtomicBool::new(false);
@@ -907,6 +912,7 @@ impl Hooks for YsmModelsMod {
         event.commands.push(Command::new("ysm"));
         event.commands.push(Command::new("ysm_next"));
         event.commands.push(Command::new("ysm_gesture"));
+        event.commands.push(Command::new("ysm_scale"));
         event.commands.push(Command::new("ysm_play"));
         event.commands.push(Command::new("ysm_action"));
         event.commands.push(Command::new("ysm_anims"));
@@ -943,6 +949,22 @@ impl Hooks for YsmModelsMod {
             return Flow::Cancel;
         } else if cmd == "ysm_gesture" || cmd == "ysm gesture" {
             cycle_gesture(host);
+            return Flow::Cancel;
+        } else if cmd == "ysm_scale" || cmd.starts_with("ysm_scale ") {
+            if let Some(rest) = cmd.strip_prefix("ysm_scale ") {
+                if let Ok(v) = rest.trim().trim_end_matches('%').parse::<u32>() {
+                    let pct = v.clamp(50, 200);
+                    RENDER_SCALE_PCT.store(pct, Ordering::Relaxed);
+                    let _ = host.chat_line(Text::literal(format!(
+                        "§b[YSM 3D]§r 模型渲染缩放 = §e{pct}%§r（50..200，角色自带缩放另计）"
+                    )));
+                    return Flow::Cancel;
+                }
+            }
+            let _ = host.chat_line(Text::literal(format!(
+                "§6[YSM 3D]§r 当前模型缩放: §e{}%§r | 用法: §b/ysm_scale 80§r 或 §b/ysm_scale 110§r",
+                RENDER_SCALE_PCT.load(Ordering::Relaxed)
+            )));
             return Flow::Cancel;
         } else if cmd == "ysm_gui" || cmd == "ysm_menu" {
             let _ = gui::open_ysm_gui(host);
@@ -1509,7 +1531,8 @@ impl Hooks for YsmModelsMod {
         let mut main_swinging = event.who.local
             && (mapping_down(host, "key.attack")
                 || host.is_key_down("key.mouse.left")
-                || LOCAL_HAND_SWING.swap(false, Ordering::Relaxed));
+                || LOCAL_HAND_SWING.swap(false, Ordering::Relaxed)
+                || LOCAL_PLACE_SWING.swap(false, Ordering::Relaxed));
         let off_swinging = event.who.local && LOCAL_OFF_SWING.swap(false, Ordering::Relaxed);
 
         // Resolve mainhand + offhand held items & item-use state from `get_arm_pose`.
@@ -1543,16 +1566,11 @@ impl Hooks for YsmModelsMod {
                 None,
             ));
         // yuqian has no idle bow/crossbow hold animation (only a firing pose);
-        // suppress bow/crossbow use/held states so the character never gets stuck aiming.
+        // keep the charge/fire `use` state (so 拉弓蓄力能播放), but fall back to the
+        // item idle hold instead of a missing hold_bow slot when not using.
         {
             let cur = PERSONA_IDX.load(Ordering::Relaxed) as usize % PERSONAS.len();
             if cur < PERSONAS.len() && PERSONAS[cur].id == "yuqian" {
-                if main_use == ytree_engine::UseKind::Bow || main_use == ytree_engine::UseKind::Crossbow {
-                    main_use = ytree_engine::UseKind::None;
-                }
-                if off_use == ytree_engine::UseKind::Bow || off_use == ytree_engine::UseKind::Crossbow {
-                    off_use = ytree_engine::UseKind::None;
-                }
                 if main_cat == ytree_engine::HeldCat::Bow || main_cat == ytree_engine::HeldCat::Crossbow {
                     main_cat = ytree_engine::HeldCat::Item;
                 }
@@ -1563,6 +1581,15 @@ impl Hooks for YsmModelsMod {
         }
         if event.who.local {
             let right_down = mapping_down(host, "key.use") || host.is_key_down("key.mouse.right");
+            // 放置方块/使用物品：右键按下沿触发一次挥臂（所有角色一致）。
+            let place_edge = right_down && !LAST_RIGHT_DOWN.swap(true, Ordering::Relaxed);
+            if !right_down {
+                LAST_RIGHT_DOWN.store(false, Ordering::Relaxed);
+            }
+            if place_edge {
+                LOCAL_PLACE_SWING.store(true, Ordering::Relaxed);
+                main_swinging = true;
+            }
             if main_cat == ytree_engine::HeldCat::Fishing && right_down {
                 main_swinging = true;
             }
@@ -1674,6 +1701,16 @@ impl Hooks for YsmModelsMod {
             None
         };
         let hot_active = HOT_SLUG.lock().ok().map(|g| !g.is_empty()).unwrap_or(false);
+        // 模型整体缩放：角色表自带 scale × 全局百分比，用于修正个别模型偏大。
+        let persona = &PERSONAS[p_idx % PERSONAS.len()];
+        let pct = (RENDER_SCALE_PCT.load(Ordering::Relaxed) as f32 / 100.0).clamp(0.3, 3.0);
+        let s = [
+            (persona.scale[0] * pct).clamp(0.2, 3.0),
+            (persona.scale[1] * pct).clamp(0.2, 3.0),
+            (persona.scale[2] * pct).clamp(0.2, 3.0),
+        ];
+        event.draw.push();
+        event.draw.scale(s);
         let drew = if !hot_active && let Some(Some(ytree)) = ytrees.get(p_idx % ytrees.len()) {
             let (ok, state) = ytree_engine::draw_ytree_model(
                 event.draw,
@@ -1692,6 +1729,7 @@ impl Hooks for YsmModelsMod {
         } else {
             draw_ysm_real_model(event.draw, p_idx, g_idx, event.player, crouching)
         };
+        event.draw.pop();
         if drew {
             event.cancelled = true;
         }
