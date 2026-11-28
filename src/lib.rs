@@ -1603,21 +1603,18 @@ impl Hooks for YsmModelsMod {
                     }
                 }
             }
-            // 空手或普通物品绝不带 use 姿势（防拉弓/进食等姿势卡在空手上）
+            // 空手或普通物品绝不带 use 姿势；无条件清除：老世界存档会残留 use 状态，
+            // 使 local_item_use() 持续为 Some，条件清理会漏掉，导致空手卡在拉弓姿势。
             if matches!(
                 main_cat,
                 ytree_engine::HeldCat::Empty | ytree_engine::HeldCat::Item
-            ) && main_use != ytree_engine::UseKind::None
-                && host.local_item_use().is_none()
-            {
+            ) {
                 main_use = ytree_engine::UseKind::None;
             }
             if matches!(
                 off_cat,
                 ytree_engine::HeldCat::Empty | ytree_engine::HeldCat::Item
-            ) && off_use != ytree_engine::UseKind::None
-                && host.local_item_use().is_none()
-            {
+            ) {
                 off_use = ytree_engine::UseKind::None;
             }
             LOCAL_HELD_CAT.store(main_cat as u32, Ordering::Relaxed);
