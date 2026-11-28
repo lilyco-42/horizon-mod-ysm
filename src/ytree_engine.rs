@@ -1047,6 +1047,7 @@ pub fn draw_ytree_model(
     st: &PlayerAnimState,
     main_stack: Option<&ItemStack>,
     off_stack: Option<&ItemStack>,
+    head_scale: f32,
 ) -> (bool, &'static str) {
     let first_q = model.bones.iter().find_map(|b| b.quads.first());
     if let Some(q) = first_q {
@@ -1625,6 +1626,18 @@ pub fn draw_ytree_model(
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // 个别角色（“娘”系）头身比偏大：单独缩 Head 骨骼及其子树，不影响身体。
+    if (head_scale - 1.0).abs() > 1e-3 {
+        let hs = head_scale.clamp(0.4, 1.5);
+        for (i, bone) in model.bones.iter().enumerate() {
+            if bone.role == BoneRole::Head {
+                attrs[i].scale[0] *= hs;
+                attrs[i].scale[1] *= hs;
+                attrs[i].scale[2] *= hs;
             }
         }
     }

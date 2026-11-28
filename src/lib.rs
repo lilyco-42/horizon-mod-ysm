@@ -1701,11 +1701,14 @@ impl Hooks for YsmModelsMod {
             None
         };
         let hot_active = HOT_SLUG.lock().ok().map(|g| !g.is_empty()).unwrap_or(false);
-        // 模型整体缩放：角色表自带 scale × 全局百分比，用于修正个别模型偏大。
-        // 名字带“娘”的几个角色（鲸鱼娘/猫娘/龙娘）模型明显偏大，固定再缩 30%。
+        // 模型整体缩放：角色表自带 scale × 全局百分比。
+        // 蓝色鲸鱼娘整体明显偏大 -> 整体再缩；其余“娘”系整体接近正常，只有头偏大 -> 只缩 Head 骨骼。
         let persona = &PERSONAS[p_idx % PERSONAS.len()];
         let pct = (RENDER_SCALE_PCT.load(Ordering::Relaxed) as f32 / 100.0).clamp(0.3, 3.0);
-        let title_bonus = if persona.title.contains('娘') { 0.70 } else { 1.0 };
+        let is_whale = persona.title.contains("鲸鱼娘");
+        let is_niang = persona.title.contains('娘');
+        let title_bonus = if is_whale { 0.60 } else if is_niang { 0.92 } else { 1.0 };
+        let head_bonus = if is_whale { 0.90 } else if is_niang { 0.72 } else { 1.0 };
         let s = [
             (persona.scale[0] * pct * title_bonus).clamp(0.2, 3.0),
             (persona.scale[1] * pct * title_bonus).clamp(0.2, 3.0),
@@ -1723,6 +1726,7 @@ impl Hooks for YsmModelsMod {
                 &anim_state,
                 main_stack.as_ref(),
                 off_stack.as_ref(),
+                head_bonus,
             );
             if event.who.local {
                 LIVE_STATE_IDX.store(state_name_to_idx(state), Ordering::Relaxed);
