@@ -1525,7 +1525,9 @@ impl Hooks for YsmModelsMod {
                         .get()
                         .and_then(|m| m.lock().ok())
                         .and_then(|g| g.clone())
-                        .filter(|h| now_tick.saturating_sub(h.tick) <= 4)
+                        // 本地玩家只认当前 tick 的采样：空手时 get_arm_pose 可能不再被调用，
+                        // 4 tick 的宽限期会让上一次持弓的缓存反复“复活”，表现为空手拉弓。
+                        .filter(|h| h.tick == now_tick)
                 } else {
                     None
                 }
@@ -1603,15 +1605,28 @@ impl Hooks for YsmModelsMod {
                     }
                 }
             }
-            // 空手或普通物品绝不带 use 姿势；无条件清除：老世界存档会残留 use 状态，
-            // 使 local_item_use() 持续为 Some，条件清理会漏掉，导致空手卡在拉弓姿势。
-            if matches!(
+            // 空手/普通物品绝不带 use 或持物姿势；以“当前实际手持物栈”为准：
+            // 老世界存档与过期的 get_arm_pose 缓存都可能残留 Bow 分类，
+            // 只看 main_cat 会漏掉，导致空手卡在拉弓/持弓姿势。
+            let stack_is_empty = |st: &Option<mod_api::ItemStack>| match st {
+                None => true,
+                Some(s) => mod_api::__private::item_key_id(s.item())
+                    .map(|id| classify_item_id(id) == ytree_engine::HeldCat::Empty)
+                    .unwrap_or(false),
+            };
+            if stack_is_empty(&main_stack) {
+                main_cat = ytree_engine::HeldCat::Empty;
+                main_use = ytree_engine::UseKind::None;
+            } else if matches!(
                 main_cat,
                 ytree_engine::HeldCat::Empty | ytree_engine::HeldCat::Item
             ) {
                 main_use = ytree_engine::UseKind::None;
             }
-            if matches!(
+            if stack_is_empty(&off_stack) {
+                off_cat = ytree_engine::HeldCat::Empty;
+                off_use = ytree_engine::UseKind::None;
+            } else if matches!(
                 off_cat,
                 ytree_engine::HeldCat::Empty | ytree_engine::HeldCat::Item
             ) {
