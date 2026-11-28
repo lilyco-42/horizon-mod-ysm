@@ -1702,10 +1702,10 @@ impl Hooks for YsmModelsMod {
         };
         let hot_active = HOT_SLUG.lock().ok().map(|g| !g.is_empty()).unwrap_or(false);
         // 模型整体缩放：角色表自带 scale × 全局百分比，用于修正个别模型偏大。
-        // 名字带“娘”的几个角色（鲸鱼娘/猫娘/龙娘）模型明显偏大，固定再缩 15%。
+        // 名字带“娘”的几个角色（鲸鱼娘/猫娘/龙娘）模型明显偏大，固定再缩 30%。
         let persona = &PERSONAS[p_idx % PERSONAS.len()];
         let pct = (RENDER_SCALE_PCT.load(Ordering::Relaxed) as f32 / 100.0).clamp(0.3, 3.0);
-        let title_bonus = if persona.title.contains('娘') { 0.85 } else { 1.0 };
+        let title_bonus = if persona.title.contains('娘') { 0.70 } else { 1.0 };
         let s = [
             (persona.scale[0] * pct * title_bonus).clamp(0.2, 3.0),
             (persona.scale[1] * pct * title_bonus).clamp(0.2, 3.0),
