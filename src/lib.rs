@@ -1,4 +1,5 @@
 mod gui;
+mod hotload;
 mod ytree_engine;
 
 use mod_api::{
@@ -15,10 +16,16 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 const DEFAULT_ASSET_SOURCE: &str = "https://dev.lain42.top/mc-assets";
+
+// Hot-loaded models from a remote asset source (dev.lain42.top).
+// HOT_SLUG empty means the active persona is one of the built-in PERSONAS.
+static HOT_SLUG: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static HOT_UPLOAD_PENDING: AtomicBool = AtomicBool::new(false);
+static HOT_CATALOG: std::sync::Mutex<Vec<hotload::CatalogItem>> = std::sync::Mutex::new(Vec::new());
 
 struct RemoteSourceConfig {
     active: String,
@@ -119,7 +126,7 @@ pub struct PersonaSpec {
     pub glow_rgb: u32,
 }
 
-pub const PERSONAS: [PersonaSpec; 9] = [
+pub const PERSONAS: [PersonaSpec; 10] = [
     PersonaSpec {
         id: "claude_ojousama",
         model_id: "m_b3d34d442c934147",
@@ -255,9 +262,24 @@ pub const PERSONAS: [PersonaSpec; 9] = [
         accent_rgb: 0xF8FAFC,
         glow_rgb: 0x7DD3FC,
     },
+    PersonaSpec {
+        id: "yuqian",
+        model_id: "yuqian_3d_v1",
+        title: "透明兔女郎雨倩 [136骨骼/8742立方体]",
+        short_title: "雨倩·透明兔女郎",
+        bones_count: 136,
+        cubes_count: 8742,
+        bones: "Root,AllBody,Head,Hair,RightArm,LeftArm,RightLeg,LeftLeg",
+        anims: "idle,walk,extra0,dance",
+        scale: [0.98, 0.98, 0.98],
+        hand_tint_offset: [0.0, 0.0, 0.0],
+        primary_rgb: 0xF472B6,
+        accent_rgb: 0xFFFFFF,
+        glow_rgb: 0xFBCFE8,
+    },
 ];
 
-pub const GESTURES: [&str; 8] = [
+pub const GESTURES: [&str; 9] = [
     "idle (默认呼吸+发丝裙摆物理摆动)",
     "wave (挥手致意)",
     "cheer (欢呼跳跃)",
@@ -266,6 +288,7 @@ pub const GESTURES: [&str; 8] = [
     "dance (角色专属星光律动舞)",
     "bow (大小姐优雅提裙礼)",
     "victory (屠龙凯旋招牌动作)",
+    "mace_twirl (重锤/武器旋风甩动 [3.8.0彩蛋])",
 ];
 
 const REACH_CHOICES: [&str; 4] = ["16 blocks", "32 blocks", "64 blocks (Default)", "128 blocks"];
@@ -275,37 +298,63 @@ pub(crate) static PERSONA_IDX: AtomicU32 = AtomicU32::new(0);
 pub(crate) static GESTURE_IDX: AtomicU32 = AtomicU32::new(0);
 static ARMOR_AUTO_HIDE: AtomicU32 = AtomicU32::new(0);
 static FIRST_PERSON_ARM: AtomicU32 = AtomicU32::new(0);
-static HUD_OVERLAY: AtomicU32 = AtomicU32::new(0);
+static HUD_OVERLAY: AtomicU32 = AtomicU32::new(1);
 static TICK_COUNTER: AtomicU32 = AtomicU32::new(0);
 static LAST_WEB_NONCE: AtomicU32 = AtomicU32::new(0);
 static IS_CROUCHING: AtomicBool = AtomicBool::new(false);
+static DOUBLE_TAP_SPRINT: AtomicBool = AtomicBool::new(false);
+static LAST_W_PRESS_TICK: AtomicU32 = AtomicU32::new(0);
 static LIVE_STATE_IDX: AtomicU32 = AtomicU32::new(0);
 static LOCAL_HELD_CAT: AtomicU32 = AtomicU32::new(0);
 static LOCAL_USE_KIND: AtomicU32 = AtomicU32::new(0);
 static LOCAL_HAND_SWING: AtomicBool = AtomicBool::new(false);
+static LOCAL_OFF_SWING: AtomicBool = AtomicBool::new(false);
 static LOCAL_RIDING: AtomicBool = AtomicBool::new(false);
+static LOCAL_IN_BOAT: AtomicBool = AtomicBool::new(false);
+static LOCAL_SLEEPING_SRV: AtomicBool = AtomicBool::new(false);
+static LOCAL_IN_WATER: AtomicBool = AtomicBool::new(false);
+static LOCAL_SWIMMING: AtomicBool = AtomicBool::new(false);
+static LOCAL_WATER_DEPTH_MM: AtomicU32 = AtomicU32::new(0);
+static LOCAL_EYE_IN_WATER: AtomicBool = AtomicBool::new(false);
+static LOCAL_EYE_HEIGHT_MM: AtomicU32 = AtomicU32::new(1620);
+static LOCAL_CREATIVE_FLYING: AtomicBool = AtomicBool::new(false);
+static LOCAL_CLIMBING: AtomicBool = AtomicBool::new(false);
+static LOCAL_VEL_Y_MM: AtomicI32 = AtomicI32::new(0);
+static LOCAL_BLOCKING: AtomicBool = AtomicBool::new(false);
 pub(crate) static NAMED_ANIM_IDX: AtomicU32 = AtomicU32::new(u32::MAX);
 pub(crate) static NAMED_ANIM_LABEL: OnceLock<Mutex<String>> = OnceLock::new();
 
 #[derive(Clone)]
 struct EntityHeld {
-    cat: ytree_engine::HeldCat,
-    use_kind: ytree_engine::UseKind,
+    main_cat: ytree_engine::HeldCat,
+    off_cat: ytree_engine::HeldCat,
+    main_use: ytree_engine::UseKind,
+    off_use: ytree_engine::UseKind,
     main_stack: Option<ItemStack>,
     off_stack: Option<ItemStack>,
     tick: u32,
 }
 
 static ENTITY_HELD: OnceLock<Mutex<HashMap<u32, EntityHeld>>> = OnceLock::new();
+static LOCAL_ENTITY_HELD: OnceLock<Mutex<Option<EntityHeld>>> = OnceLock::new();
+
+fn item_id_segment(id: &str) -> &str {
+    let s = id.rsplit_once(':').map(|(_, tail)| tail).unwrap_or(id);
+    s.rsplit('/').next().unwrap_or(s)
+}
 
 fn classify_item_id(id: &str) -> ytree_engine::HeldCat {
-    let l = id.to_ascii_lowercase();
-    if l.contains("sword") || l.contains("katana") || l.contains("blade") {
-        ytree_engine::HeldCat::Sword
-    } else if l.contains("crossbow") {
-        ytree_engine::HeldCat::Crossbow
-    } else if l.contains("bow") {
+    let name = item_id_segment(id);
+    let l = name.to_ascii_lowercase();
+    if l.is_empty() || l == "air" {
+        return ytree_engine::HeldCat::Empty;
+    }
+    if l == "bow" || l.ends_with("_bow") || l.starts_with("bow_") {
         ytree_engine::HeldCat::Bow
+    } else if l == "crossbow" || l.ends_with("_crossbow") || l.starts_with("crossbow_") {
+        ytree_engine::HeldCat::Crossbow
+    } else if l.contains("sword") || l.contains("katana") || l.contains("blade") {
+        ytree_engine::HeldCat::Sword
     } else if l.contains("shield") {
         ytree_engine::HeldCat::Shield
     } else if l.contains("fishing_rod") {
@@ -314,8 +363,6 @@ fn classify_item_id(id: &str) -> ytree_engine::HeldCat {
         ytree_engine::HeldCat::Spear
     } else if l.contains("pickaxe") || l.contains("axe") || l.contains("shovel") || l.contains("hoe") {
         ytree_engine::HeldCat::Tool
-    } else if l.is_empty() || l == "minecraft:air" {
-        ytree_engine::HeldCat::Empty
     } else {
         ytree_engine::HeldCat::Item
     }
@@ -323,9 +370,15 @@ fn classify_item_id(id: &str) -> ytree_engine::HeldCat {
 
 fn map_use_anim(anim: UseAnimation) -> ytree_engine::UseKind {
     match anim {
-        UseAnimation::Eat | UseAnimation::Drink => ytree_engine::UseKind::Eat,
-        UseAnimation::Bow | UseAnimation::Crossbow | UseAnimation::Spear => ytree_engine::UseKind::Bow,
+        UseAnimation::Eat => ytree_engine::UseKind::Eat,
+        UseAnimation::Drink => ytree_engine::UseKind::Drink,
+        UseAnimation::Bow => ytree_engine::UseKind::Bow,
+        UseAnimation::Crossbow => ytree_engine::UseKind::Crossbow,
+        UseAnimation::Trident | UseAnimation::Spear => ytree_engine::UseKind::Spear,
         UseAnimation::Block => ytree_engine::UseKind::Block,
+        UseAnimation::Spyglass => ytree_engine::UseKind::Spyglass,
+        UseAnimation::TootHorn => ytree_engine::UseKind::Horn,
+        UseAnimation::Brush => ytree_engine::UseKind::Brush,
         _ => ytree_engine::UseKind::None,
     }
 }
@@ -337,15 +390,26 @@ fn mapping_down(host: &dyn ClientHost, name: &str) -> bool {
         .is_some_and(|m| m.down)
 }
 
-const LIVE_STATE_NAMES: [&str; 15] = [
+const LIVE_STATE_NAMES: [&str; 27] = [
     "idle",
     "walk",
     "run",
     "sneak",
     "sneaking",
     "jump",
+    "fly",
+    "elytra_fly",
     "ride",
+    "boat",
+    "swim",
+    "swim_stand",
+    "ladder_up",
+    "ladder_down",
+    "ladder_stillness",
+    "sleep",
     "attacked",
+    "death",
+    "custom",
     "extra1/wave",
     "extra2/cheer",
     "extra3/work",
@@ -353,6 +417,7 @@ const LIVE_STATE_NAMES: [&str; 15] = [
     "extra5/dance",
     "extra6/bow",
     "extra7/victory",
+    "extra8/mace_twirl",
 ];
 
 fn state_name_to_idx(name: &str) -> u32 {
@@ -443,7 +508,7 @@ struct BakedModel {
     groups: [BakedGroup; 6],
 }
 
-pub(crate) const MODEL_SPECS: [(&str, &str); 9] = [
+pub(crate) const MODEL_SPECS: [(&str, &str); 10] = [
     ("claude_ojousama", "ysm_models:entity/claude_ojousama"),
     ("claude_butterfly", "ysm_models:entity/claude_butterfly"),
     ("deepseek_whale", "ysm_models:entity/deepseek_whale"),
@@ -453,6 +518,7 @@ pub(crate) const MODEL_SPECS: [(&str, &str); 9] = [
     ("gemini_cheshire", "ysm_models:entity/gemini_cheshire"),
     ("gemini_nekomiya", "ysm_models:entity/gemini_nekomiya"),
     ("lyco_ip", "ysm_models:entity/lyco_ip"),
+    ("yuqian", "ysm_models:entity/yuqian"),
 ];
 
 static BAKED_MODELS: OnceLock<Vec<BakedModel>> = OnceLock::new();
@@ -565,7 +631,19 @@ fn draw_ysm_real_model(
     crouching: bool,
 ) -> bool {
     let models = baked_models();
-    let model = &models[p_idx % models.len()];
+    let builtin = &models[p_idx % models.len()];
+
+    // A hot-loaded model overrides the built-in one: parsed on the fly from its
+    // downloaded .bin and textured through the single mod_image sprite slot.
+    let hot_model = {
+        let slug = HOT_SLUG.lock().ok().map(|g| g.clone()).unwrap_or_default();
+        if slug.is_empty() {
+            None
+        } else {
+            hotload::load_hot(&slug).map(|hm| parse_baked_model(hotload::sprite_name(), &hm.bin))
+        }
+    };
+    let model: &BakedModel = hot_model.as_ref().unwrap_or(builtin);
 
     // Probe the sprite with the first available quad before cancelling vanilla
     let first_quad = model.groups.iter().find_map(|g| g.quads.first());
@@ -794,7 +872,7 @@ impl Hooks for YsmModelsMod {
             "hud_overlay",
             "ysm_models.setting.hud_overlay",
             b_opts.clone(),
-            0,
+            1,
         ));
         let _ = r.register_setting(SettingSpec::choice(
             "multiplayer_sync",
@@ -841,6 +919,9 @@ impl Hooks for YsmModelsMod {
         event.commands.push(Command::new("ysm_token"));
         event.commands.push(Command::new("ysm_sync"));
         event.commands.push(Command::new("ysm_download"));
+        event.commands.push(Command::new("ysm_hotlist"));
+        event.commands.push(Command::new("ysm_fetch"));
+        event.commands.push(Command::new("ysm_hot"));
         event.commands.push(Command::new("mc_hub"));
         event.commands.push(Command::new("mc_sync_all"));
     }
@@ -975,23 +1056,64 @@ impl Hooks for YsmModelsMod {
             return Flow::Cancel;
         } else if cmd == "ysm_sync" {
             let cfg = load_source_cfg();
-            let url = format!("{}/api/v1/manifest.json?kind=ysm&token={}", cfg.active, cfg.token);
-            match http_get_text(&url) {
-                Ok(body) => {
-                    let slugs: Vec<&str> = body
-                        .split("\"slug\":\"")
-                        .skip(1)
-                        .filter_map(|s| s.split('"').next())
-                        .collect();
+            match hotload::fetch_manifest(&cfg.active, &cfg.token) {
+                Ok(items) => {
+                    hotload::save_catalog(&items);
+                    if let Ok(mut c) = HOT_CATALOG.lock() { *c = items.clone(); }
+                    let preview: Vec<String> = items.iter().take(12).map(|(s, _, _, _)| s.clone()).collect();
                     let _ = host.chat_line(Text::literal(format!(
-                        "§6[YSM 云端目录]§r 从 §b{}§r 同步到 §e{}§r 款 3D 模型: {} | 下载命令: /ysm_download <slug>",
-                        cfg.active,
-                        slugs.len(),
-                        slugs.join(", ")
+                        "§6[YSM 云端目录]§r 从 §b{}§r 同步到 §e{}§r 款 3D 模型: {} ... | 下载: /ysm_fetch <slug> | 列表: /ysm_hotlist",
+                        cfg.active, items.len(), preview.join(", ")
                     )));
                 }
                 Err(e) => {
                     let _ = host.chat_line(Text::literal(format!("§c[YSM 云端同步失败]§r {e}")));
+                }
+            }
+            return Flow::Cancel;
+        } else if cmd == "ysm_hotlist" {
+            let items = hotload::load_catalog();
+            let hot_slug = HOT_SLUG.lock().ok().map(|g| g.clone()).unwrap_or_default();
+            let preview: Vec<String> = items.iter().take(20).map(|(s, t, _, _)| format!("{} ({})", s, t)).collect();
+            let _ = host.chat_line(Text::literal(format!(
+                "§6[YSM 热加载目录]§r 共 §e{}§r 款 | 当前热模型: §a{}§r\n{}",
+                items.len(), if hot_slug.is_empty() { "无(内置角色)" } else { &hot_slug },
+                preview.join("\n")
+            )));
+            return Flow::Cancel;
+        } else if let Some(rest) = cmd.strip_prefix("ysm_fetch ") {
+            let slug = rest.trim().trim_start_matches("ysm:").to_string();
+            let cfg = load_source_cfg();
+            match hotload::download(&cfg.active, &cfg.token, &slug) {
+                Ok(hm) => {
+                    let _ = host.chat_line(Text::literal(format!(
+                        "§a[YSM 热下载成功]§r §e{slug}§r ({}) 已就绪，输入 §b/ysm_hot {slug}§r 立即换装",
+                        hm.title
+                    )));
+                }
+                Err(e) => {
+                    let _ = host.chat_line(Text::literal(format!("§c[YSM 热下载失败]§r {slug}: {e}")));
+                }
+            }
+            return Flow::Cancel;
+        } else if let Some(rest) = cmd.strip_prefix("ysm_hot ") {
+            let slug = rest.trim().trim_start_matches("ysm:").to_string();
+            if slug.eq_ignore_ascii_case("off") || slug == "0" {
+                if let Ok(mut g) = HOT_SLUG.lock() { g.clear(); }
+                HOT_UPLOAD_PENDING.store(false, Ordering::Relaxed);
+                let _ = host.chat_line(Text::literal("§b[YSM 热加载]§r 已切回内置角色"));
+            } else {
+                match hotload::load_hot(&slug) {
+                    Some(_) => {
+                        if let Ok(mut g) = HOT_SLUG.lock() { *g = slug.clone(); }
+                        HOT_UPLOAD_PENDING.store(true, Ordering::Relaxed);
+                        let _ = host.chat_line(Text::literal(format!(
+                            "§a[YSM 热加载]§r 已即时切换 -> §e{slug}§r (贴图将在下一帧上传)"
+                        )));
+                    }
+                    None => {
+                        let _ = host.chat_line(Text::literal(format!("§c[YSM 热加载]§r 未下载 {slug}，先 /ysm_fetch {slug}")));
+                    }
                 }
             }
             return Flow::Cancel;
@@ -1095,16 +1217,36 @@ impl Hooks for YsmModelsMod {
     fn input_key(&self, host: &mut dyn ClientHost, event: &mut InputKeyEvent<'_>) {
         if !host.playing() {
             IS_CROUCHING.store(false, Ordering::Relaxed);
+            DOUBLE_TAP_SPRINT.store(false, Ordering::Relaxed);
             return;
         }
         if event.key == "key.keyboard.left.shift" || event.key == "key.keyboard.right.shift" {
             IS_CROUCHING.store(event.action != KeyAction::Release, Ordering::Relaxed);
         }
+        if event.key == "key.keyboard.w" {
+            if event.action == KeyAction::Press {
+                let now = TICK_COUNTER.load(Ordering::Relaxed);
+                let prev = LAST_W_PRESS_TICK.swap(now, Ordering::Relaxed);
+                if prev > 0 && now.saturating_sub(prev) <= 8 {
+                    DOUBLE_TAP_SPRINT.store(true, Ordering::Relaxed);
+                }
+            } else if event.action == KeyAction::Release {
+                DOUBLE_TAP_SPRINT.store(false, Ordering::Relaxed);
+            }
+        }
         if event.action != KeyAction::Press {
             return;
         }
         // Handle Y/G in input_key ONLY if consume_click hasn't already drained it, or for horizon-ctl direct key taps
-        if event.key == "key.keyboard.y" && !host.is_down(ID, KEY_CYCLE_MODEL) {
+        if event.key == "key.keyboard.f9" {
+            let next = if HUD_OVERLAY.load(Ordering::Relaxed) == 0 { 1 } else { 0 };
+            HUD_OVERLAY.store(next, Ordering::Relaxed);
+            let _ = host.chat_line(Text::literal(if next == 0 {
+                "§b[Lilyco HUD]§r 调试信息已显示 §7(按 F9 再次隐藏)".to_string()
+            } else {
+                "§b[Lilyco HUD]§r 调试信息已隐藏 §7(按 F9 重新显示)".to_string()
+            }));
+        } else if event.key == "key.keyboard.y" && !host.is_down(ID, KEY_CYCLE_MODEL) {
             cycle_model(host);
         } else if event.key == "key.keyboard.g" && !host.is_down(ID, KEY_CYCLE_GESTURE) {
             cycle_gesture(host);
@@ -1114,7 +1256,77 @@ impl Hooks for YsmModelsMod {
     }
 
     fn client_tick_post(&self, host: &mut dyn ClientHost, _: &mut ClientTickPostEvent) {
+        // Upload the hot-loaded model's texture into the shared mod_image slot once,
+        // right after /ysm_hot marks it pending. Render then uses "horizon/modimage".
+        if HOT_UPLOAD_PENDING.swap(false, Ordering::Relaxed) {
+            let slug = HOT_SLUG.lock().ok().map(|g| g.clone()).unwrap_or_default();
+            if !slug.is_empty() {
+                match hotload::load_hot(&slug).ok_or_else(|| "模型未就绪".to_string()).and_then(|hm| hotload::rgba_for_upload(&hm)) {
+                    Ok((w, h, rgba)) => {
+                        let ok = host.mod_image(w, h, &rgba);
+                        let _ = host.chat_line(Text::literal(format!(
+                            "§b[YSM 热贴图]§r {}x{} 上传{}",
+                            w, h, if ok { "成功" } else { "失败(检查尺寸≤1024)" }
+                        )));
+                    }
+                    Err(e) => {
+                        let _ = host.chat_line(Text::literal(format!("§c[YSM 热贴图失败]§r {e}")));
+                    }
+                }
+            }
+        }
         let tick = TICK_COUNTER.fetch_add(1, Ordering::Relaxed);
+        // Sample 100% client-predicted movement/posture state (works in both singleplayer & multiplayer!)
+        if let Some(player) = host.local_player() {
+            let entity = player.entity();
+            let living = host.living(entity);
+
+            let depth_mm = entity
+                .fluid_heights(host)
+                .and_then(|heights| {
+                    heights
+                        .into_iter()
+                        .find(|(k, _)| k.contains("water"))
+                        .map(|(_, h)| (h.max(0.0) * 1000.0) as u32)
+                })
+                .unwrap_or(0);
+            LOCAL_WATER_DEPTH_MM.store(depth_mm, Ordering::Relaxed);
+            let eye_water = entity
+                .eye_fluid(host)
+                .flatten()
+                .is_some_and(|f| f.contains("water"));
+            LOCAL_EYE_IN_WATER.store(eye_water, Ordering::Relaxed);
+
+            // Eye height (mm): standing ~1620, crouching ~1270, swimming/elytra ~400, sleeping ~200
+            let eye_h_mm = entity
+                .eye_height(host)
+                .map(|h| (h.max(0.0) * 1000.0) as u32)
+                .unwrap_or(1620);
+            LOCAL_EYE_HEIGHT_MM.store(eye_h_mm, Ordering::Relaxed);
+
+            let flying = player.abilities(host).is_some_and(|a| a.flying);
+            LOCAL_CREATIVE_FLYING.store(flying, Ordering::Relaxed);
+
+            let climbing = living.and_then(|l| l.is_climbing(host)).unwrap_or(false);
+            LOCAL_CLIMBING.store(climbing, Ordering::Relaxed);
+
+            let vy_mm = entity
+                .velocity(host)
+                .map(|v| (v[1] * 1000.0).clamp(-10000.0, 10000.0) as i32)
+                .unwrap_or(0);
+            LOCAL_VEL_Y_MM.store(vy_mm, Ordering::Relaxed);
+
+            let blocking = living.and_then(|l| l.is_blocking(host)).unwrap_or(false);
+            LOCAL_BLOCKING.store(blocking, Ordering::Relaxed);
+        } else {
+            LOCAL_WATER_DEPTH_MM.store(0, Ordering::Relaxed);
+            LOCAL_EYE_IN_WATER.store(false, Ordering::Relaxed);
+            LOCAL_EYE_HEIGHT_MM.store(1620, Ordering::Relaxed);
+            LOCAL_CREATIVE_FLYING.store(false, Ordering::Relaxed);
+            LOCAL_CLIMBING.store(false, Ordering::Relaxed);
+            LOCAL_VEL_Y_MM.store(0, Ordering::Relaxed);
+            LOCAL_BLOCKING.store(false, Ordering::Relaxed);
+        }
         if tick % 10 == 0 {
             if let Ok(raw) = fs::read_to_string("horizon-mods/.horizon-mod-data/ysm_models/web_switch.txt") {
                 let mut parts = raw.split_whitespace();
@@ -1122,6 +1334,11 @@ impl Hooks for YsmModelsMod {
                     if let (Ok(p_idx), Ok(g_idx), Ok(nonce)) = (p_s.parse::<usize>(), g_s.parse::<usize>(), n_s.parse::<u32>()) {
                         if nonce != 0 && nonce != LAST_WEB_NONCE.load(Ordering::Relaxed) {
                             LAST_WEB_NONCE.store(nonce, Ordering::Relaxed);
+                            // A hot-loaded remote model takes priority over the web GUI's
+                            // built-in persona switch; ignore web switches while it is active.
+                            if HOT_SLUG.lock().ok().map(|g| !g.is_empty()).unwrap_or(false) {
+                                return;
+                            }
                             let p_clamped = p_idx % PERSONAS.len();
                             let g_clamped = g_idx % GESTURES.len();
                             PERSONA_IDX.store(p_clamped as u32, Ordering::Relaxed);
@@ -1162,36 +1379,73 @@ impl Hooks for YsmModelsMod {
                     .unwrap_or(ytree_engine::HeldCat::Item)
             })
             .unwrap_or(ytree_engine::HeldCat::Empty);
-        let use_kind = if event.humanoid.use_hand.is_some() {
-            map_use_anim(event.humanoid.use_animation)
-        } else {
-            ytree_engine::UseKind::None
+        let off_cat = event
+            .humanoid
+            .off_hand
+            .map(|s| {
+                mod_api::__private::item_key_id(s.item())
+                    .map(classify_item_id)
+                    .unwrap_or(ytree_engine::HeldCat::Item)
+            })
+            .unwrap_or(ytree_engine::HeldCat::Empty);
+        let (main_use, off_use) = match event.humanoid.use_hand {
+            Some(Hand::Main) => (map_use_anim(event.humanoid.use_animation), ytree_engine::UseKind::None),
+            Some(Hand::Off) => (ytree_engine::UseKind::None, map_use_anim(event.humanoid.use_animation)),
+            None => (ytree_engine::UseKind::None, ytree_engine::UseKind::None),
+        };
+        let entry = EntityHeld {
+            main_cat,
+            off_cat,
+            main_use,
+            off_use,
+            main_stack: event.humanoid.main_hand.cloned(),
+            off_stack: event.humanoid.off_hand.cloned(),
+            tick: now,
         };
         let map = ENTITY_HELD.get_or_init(|| Mutex::new(HashMap::new()));
         if let Ok(mut guard) = map.lock() {
-            guard.insert(
-                event.entity_id,
-                EntityHeld {
-                    cat: main_cat,
-                    use_kind,
-                    main_stack: event.humanoid.main_hand.cloned(),
-                    off_stack: event.humanoid.off_hand.cloned(),
-                    tick: now,
-                },
-            );
+            guard.insert(event.entity_id, entry.clone());
+        }
+        if let Ok(mut local_guard) = LOCAL_ENTITY_HELD.get_or_init(|| Mutex::new(None)).lock() {
+            *local_guard = Some(entry);
         }
         None
     }
 
     fn server_tick(&self, host: &mut dyn ServerHost, _: &mut ServerTickEvent) {
+        // Optional singleplayer/integrated-server boost (pure client works without this!)
         let mut any_riding = false;
+        let mut any_boat = false;
+        let mut any_sleeping = false;
+        let mut any_in_water = false;
+        let mut any_swimming = false;
         for p in host.players().server_players() {
-            if p.entity().is_passenger(host).unwrap_or(false) {
+            let ent = p.entity();
+            if ent.is_passenger(host).unwrap_or(false) {
                 any_riding = true;
-                break;
+                if let Some(veh) = ent.vehicle(host) {
+                    if veh.name(host).is_some_and(|n| {
+                        let l = n.to_ascii_lowercase();
+                        l.contains("boat") || l.contains("raft")
+                    }) {
+                        any_boat = true;
+                    }
+                }
+            }
+            if ent.is_in_water(host).unwrap_or(false) {
+                any_in_water = true;
+            }
+            match ent.pose(host) {
+                Some("swimming") => any_swimming = true,
+                Some("sleeping") => any_sleeping = true,
+                _ => {}
             }
         }
         LOCAL_RIDING.store(any_riding, Ordering::Relaxed);
+        LOCAL_IN_BOAT.store(any_boat, Ordering::Relaxed);
+        LOCAL_SLEEPING_SRV.store(any_sleeping, Ordering::Relaxed);
+        LOCAL_IN_WATER.store(any_in_water, Ordering::Relaxed);
+        LOCAL_SWIMMING.store(any_swimming, Ordering::Relaxed);
     }
 
     fn render_player_pre(
@@ -1205,6 +1459,7 @@ impl Hooks for YsmModelsMod {
         let p_idx = resolve_player_persona(event.who.name, event.who.local);
         let g_idx = GESTURE_IDX.load(Ordering::Relaxed) as usize % GESTURES.len();
         let riding = event.who.local && LOCAL_RIDING.load(Ordering::Relaxed);
+        let in_boat = event.who.local && LOCAL_IN_BOAT.load(Ordering::Relaxed);
         let crouching = event.who.local
             && (mapping_down(host, "key.sneak")
                 || host.is_key_down("key.keyboard.left.shift")
@@ -1220,42 +1475,184 @@ impl Hooks for YsmModelsMod {
                 || host.is_key_down("key.keyboard.a")
                 || host.is_key_down("key.keyboard.d"));
         let sprinting = event.who.local
-            && (mapping_down(host, "key.sprint") || host.is_key_down("key.keyboard.left.control"));
+            && (mapping_down(host, "key.sprint")
+                || host.is_key_down("key.keyboard.left.control")
+                || DOUBLE_TAP_SPRINT.load(Ordering::Relaxed));
         let jumping = event.who.local
             && (mapping_down(host, "key.jump") || host.is_key_down("key.keyboard.space"));
-        let mut swinging = event.who.local
+        let water_depth = (LOCAL_WATER_DEPTH_MM.load(Ordering::Relaxed) as f32) * 0.001;
+        let eye_in_water = LOCAL_EYE_IN_WATER.load(Ordering::Relaxed);
+        let eye_height = (LOCAL_EYE_HEIGHT_MM.load(Ordering::Relaxed) as f32) * 0.001;
+        let creative_flying = event.who.local && LOCAL_CREATIVE_FLYING.load(Ordering::Relaxed);
+        let climbing = event.who.local && LOCAL_CLIMBING.load(Ordering::Relaxed) && !creative_flying && !riding;
+        let climb_vy = (LOCAL_VEL_Y_MM.load(Ordering::Relaxed) as f32) * 0.001;
+        let server_in_water = LOCAL_IN_WATER.load(Ordering::Relaxed);
+        let server_swimming = LOCAL_SWIMMING.load(Ordering::Relaxed);
+        let sleeping = event.who.local
+            && (LOCAL_SLEEPING_SRV.load(Ordering::Relaxed) || eye_height <= 0.30);
+        let in_water = event.who.local
+            && (server_swimming
+                || eye_in_water
+                || water_depth > 0.35
+                || (server_in_water && !event.player.on_ground));
+        let swimming = event.who.local
+            && (server_swimming
+                || eye_in_water
+                || (in_water && (moving || eye_height < 0.75)));
+        let elytra_flying = event.who.local
+            && !event.player.on_ground
+            && !creative_flying
+            && !in_water
+            && !sleeping
+            && !riding
+            && eye_height < 0.75;
+        let mut main_swinging = event.who.local
             && (mapping_down(host, "key.attack")
                 || host.is_key_down("key.mouse.left")
                 || LOCAL_HAND_SWING.swap(false, Ordering::Relaxed));
+        let off_swinging = event.who.local && LOCAL_OFF_SWING.swap(false, Ordering::Relaxed);
 
-        // Resolve held item & item-use state from `get_arm_pose` (works for local + remote players in 3rd person!)
+        // Resolve mainhand + offhand held items & item-use state from `get_arm_pose`.
         let now_tick = TICK_COUNTER.load(Ordering::Relaxed);
-        let (held_cat, mut use_kind, main_stack, off_stack) = ENTITY_HELD
+        let held_opt = ENTITY_HELD
             .get()
             .and_then(|m| m.lock().ok())
             .and_then(|g| g.get(&event.player.id).cloned())
             .filter(|h| now_tick.saturating_sub(h.tick) <= 4)
-            .map(|h| (h.cat, h.use_kind, h.main_stack, h.off_stack))
-            .unwrap_or((ytree_engine::HeldCat::Empty, ytree_engine::UseKind::None, None, None));
-        if event.who.local {
-            // Casting a fishing rod with right-click triggers the cast swing animation
-            if held_cat == ytree_engine::HeldCat::Fishing
-                && (mapping_down(host, "key.use") || host.is_key_down("key.mouse.right"))
-            {
-                swinging = true;
+            .or_else(|| {
+                if event.who.local {
+                    LOCAL_ENTITY_HELD
+                        .get()
+                        .and_then(|m| m.lock().ok())
+                        .and_then(|g| g.clone())
+                        .filter(|h| now_tick.saturating_sub(h.tick) <= 4)
+                } else {
+                    None
+                }
+            });
+        let (mut main_cat, mut off_cat, mut main_use, mut off_use, main_stack, off_stack) = held_opt
+            .map(|h| (h.main_cat, h.off_cat, h.main_use, h.off_use, h.main_stack, h.off_stack))
+            .unwrap_or((
+                ytree_engine::HeldCat::Empty,
+                ytree_engine::HeldCat::Empty,
+                ytree_engine::UseKind::None,
+                ytree_engine::UseKind::None,
+                None,
+                None,
+            ));
+        // yuqian has no idle bow/crossbow hold animation (only a firing pose);
+        // suppress bow/crossbow use/held states so the character never gets stuck aiming.
+        {
+            let cur = PERSONA_IDX.load(Ordering::Relaxed) as usize % PERSONAS.len();
+            if cur < PERSONAS.len() && PERSONAS[cur].id == "yuqian" {
+                if main_use == ytree_engine::UseKind::Bow || main_use == ytree_engine::UseKind::Crossbow {
+                    main_use = ytree_engine::UseKind::None;
+                }
+                if off_use == ytree_engine::UseKind::Bow || off_use == ytree_engine::UseKind::Crossbow {
+                    off_use = ytree_engine::UseKind::None;
+                }
+                if main_cat == ytree_engine::HeldCat::Bow || main_cat == ytree_engine::HeldCat::Crossbow {
+                    main_cat = ytree_engine::HeldCat::Item;
+                }
+                if off_cat == ytree_engine::HeldCat::Bow || off_cat == ytree_engine::HeldCat::Crossbow {
+                    off_cat = ytree_engine::HeldCat::Item;
+                }
             }
-            if use_kind == ytree_engine::UseKind::None && host.local_item_use().is_some() {
-                use_kind = match held_cat {
-                    ytree_engine::HeldCat::Bow | ytree_engine::HeldCat::Crossbow => {
-                        ytree_engine::UseKind::Bow
-                    }
-                    ytree_engine::HeldCat::Shield => ytree_engine::UseKind::Block,
-                    _ => ytree_engine::UseKind::Eat,
-                };
-            }
-            LOCAL_HELD_CAT.store(held_cat as u32, Ordering::Relaxed);
-            LOCAL_USE_KIND.store(use_kind as u32, Ordering::Relaxed);
         }
+        if event.who.local {
+            let right_down = mapping_down(host, "key.use") || host.is_key_down("key.mouse.right");
+            if main_cat == ytree_engine::HeldCat::Fishing && right_down {
+                main_swinging = true;
+            }
+            if LOCAL_BLOCKING.load(Ordering::Relaxed)
+                && main_use != ytree_engine::UseKind::Block
+                && off_use != ytree_engine::UseKind::Block
+            {
+                if off_cat == ytree_engine::HeldCat::Shield {
+                    off_use = ytree_engine::UseKind::Block;
+                } else if main_cat == ytree_engine::HeldCat::Shield {
+                    main_use = ytree_engine::UseKind::Block;
+                }
+            }
+            if main_use == ytree_engine::UseKind::None && off_use == ytree_engine::UseKind::None {
+                if let Some(iu) = host.local_item_use() {
+                    let is_off = iu.hand == Hand::Off;
+                    let cat = if is_off { off_cat } else { main_cat };
+                    let kind = match cat {
+                        ytree_engine::HeldCat::Bow => ytree_engine::UseKind::Bow,
+                        ytree_engine::HeldCat::Crossbow => ytree_engine::UseKind::Crossbow,
+                        ytree_engine::HeldCat::Shield => ytree_engine::UseKind::Block,
+                        ytree_engine::HeldCat::Spear => ytree_engine::UseKind::Spear,
+                        _ => ytree_engine::UseKind::Eat,
+                    };
+                    if is_off {
+                        off_use = kind;
+                    } else {
+                        main_use = kind;
+                    }
+                } else if right_down {
+                    match main_cat {
+                        ytree_engine::HeldCat::Bow => main_use = ytree_engine::UseKind::Bow,
+                        ytree_engine::HeldCat::Crossbow => main_use = ytree_engine::UseKind::Crossbow,
+                        ytree_engine::HeldCat::Shield => main_use = ytree_engine::UseKind::Block,
+                        ytree_engine::HeldCat::Spear => main_use = ytree_engine::UseKind::Spear,
+                        _ if off_cat == ytree_engine::HeldCat::Shield => {
+                            off_use = ytree_engine::UseKind::Block;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // 空手或普通物品绝不带 use 姿势（防拉弓/进食等姿势卡在空手上）
+            if matches!(
+                main_cat,
+                ytree_engine::HeldCat::Empty | ytree_engine::HeldCat::Item
+            ) && main_use != ytree_engine::UseKind::None
+                && host.local_item_use().is_none()
+            {
+                main_use = ytree_engine::UseKind::None;
+            }
+            if matches!(
+                off_cat,
+                ytree_engine::HeldCat::Empty | ytree_engine::HeldCat::Item
+            ) && off_use != ytree_engine::UseKind::None
+                && host.local_item_use().is_none()
+            {
+                off_use = ytree_engine::UseKind::None;
+            }
+            LOCAL_HELD_CAT.store(main_cat as u32, Ordering::Relaxed);
+            LOCAL_USE_KIND.store(
+                if main_use != ytree_engine::UseKind::None {
+                    main_use as u32
+                } else {
+                    off_use as u32
+                },
+                Ordering::Relaxed,
+            );
+        }
+
+        let anim_state = ytree_engine::PlayerAnimState {
+            local: event.who.local,
+            riding,
+            in_boat,
+            sleeping,
+            elytra_flying,
+            creative_flying,
+            climbing,
+            climb_vy,
+            in_water,
+            swimming,
+            crouching,
+            moving,
+            sprinting,
+            jumping,
+            main_swinging,
+            off_swinging,
+            main_cat,
+            off_cat,
+            main_use,
+            off_use,
+        };
 
         let ytrees = ytree_engine::get_ytree_models(&MODEL_SPECS);
         let named_raw = NAMED_ANIM_IDX.load(Ordering::Relaxed);
@@ -1264,22 +1661,15 @@ impl Hooks for YsmModelsMod {
         } else {
             None
         };
-        let drew = if let Some(Some(ytree)) = ytrees.get(p_idx % ytrees.len()) {
+        let hot_active = HOT_SLUG.lock().ok().map(|g| !g.is_empty()).unwrap_or(false);
+        let drew = if !hot_active && let Some(Some(ytree)) = ytrees.get(p_idx % ytrees.len()) {
             let (ok, state) = ytree_engine::draw_ytree_model(
                 event.draw,
                 ytree,
                 g_idx,
                 named_idx,
                 event.player,
-                event.who.local,
-                riding,
-                crouching,
-                moving,
-                sprinting,
-                jumping,
-                swinging,
-                held_cat,
-                use_kind,
+                &anim_state,
                 main_stack.as_ref(),
                 off_stack.as_ref(),
             );
@@ -1324,6 +1714,8 @@ impl Hooks for YsmModelsMod {
                 .map(classify_item_id)
                 .unwrap_or(ytree_engine::HeldCat::Empty);
             LOCAL_HELD_CAT.store(cat as u32, Ordering::Relaxed);
+        } else if event.render.hand == Hand::Off && event.render.swing > 0.02 {
+            LOCAL_OFF_SWING.store(true, Ordering::Relaxed);
         }
         if FIRST_PERSON_ARM.load(Ordering::Relaxed) == 0 {
             let p = &PERSONAS[PERSONA_IDX.load(Ordering::Relaxed) as usize % PERSONAS.len()];
@@ -1355,7 +1747,20 @@ impl Hooks for YsmModelsMod {
             .get(LIVE_STATE_IDX.load(Ordering::Relaxed) as usize)
             .copied()
             .unwrap_or("idle");
-        let held_label = ytree_engine::HeldCat::from_u8(LOCAL_HELD_CAT.load(Ordering::Relaxed) as u8).label();
+        let held_cat_hud = ytree_engine::HeldCat::from_u8(LOCAL_HELD_CAT.load(Ordering::Relaxed) as u8);
+        let use_kind_hud = LOCAL_USE_KIND.load(Ordering::Relaxed);
+        let held_label = match use_kind_hud {
+            1 => "进食",
+            2 => "持弓(拉弓)",
+            3 => "盾牌(格挡)",
+            4 => "饮用",
+            5 => "望远镜",
+            6 => "长兵",
+            7 => "持弩",
+            8 => "刷子",
+            9 => "羊角号",
+            _ => held_cat_hud.label(),
+        };
         let named_raw = NAMED_ANIM_IDX.load(Ordering::Relaxed);
         let custom_label = if named_raw != u32::MAX {
             NAMED_ANIM_LABEL

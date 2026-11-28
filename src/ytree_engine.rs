@@ -42,8 +42,9 @@ const SLOT_RIDE: usize = 28;
 const SLOT_SWIM: usize = 29;
 const TOTAL_SLOTS: usize = 30;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum HeldCat {
+    #[default]
     Empty = 0,
     Sword = 1,
     Bow = 2,
@@ -85,12 +86,19 @@ impl HeldCat {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum UseKind {
+    #[default]
     None = 0,
     Eat = 1,
     Bow = 2,
     Block = 3,
+    Drink = 4,
+    Spyglass = 5,
+    Spear = 6,
+    Crossbow = 7,
+    Brush = 8,
+    Horn = 9,
 }
 
 impl UseKind {
@@ -99,9 +107,40 @@ impl UseKind {
             1 => Self::Eat,
             2 => Self::Bow,
             3 => Self::Block,
+            4 => Self::Drink,
+            5 => Self::Spyglass,
+            6 => Self::Spear,
+            7 => Self::Crossbow,
+            8 => Self::Brush,
+            9 => Self::Horn,
             _ => Self::None,
         }
     }
+}
+
+/// Complete client-predicted player animation state (no server required; server boosts optional).
+#[derive(Clone, Copy, Default)]
+pub struct PlayerAnimState {
+    pub local: bool,
+    pub riding: bool,
+    pub in_boat: bool,
+    pub sleeping: bool,
+    pub elytra_flying: bool,
+    pub creative_flying: bool,
+    pub climbing: bool,
+    pub climb_vy: f32,
+    pub in_water: bool,
+    pub swimming: bool,
+    pub crouching: bool,
+    pub moving: bool,
+    pub sprinting: bool,
+    pub jumping: bool,
+    pub main_swinging: bool,
+    pub off_swinging: bool,
+    pub main_cat: HeldCat,
+    pub off_cat: HeldCat,
+    pub main_use: UseKind,
+    pub off_use: UseKind,
 }
 
 const FLAG_ROT: u8 = 1;
@@ -204,6 +243,7 @@ struct TreeBone {
     role: BoneRole,
     is_core_root: bool,
     is_gui_prop: bool,
+    is_locator: bool,
     depth: usize,
     subtree_end: usize,
     pivot: Vec3,
@@ -227,12 +267,98 @@ struct AnimSlot {
     tracks: Vec<AnimTrack>,
 }
 
+#[derive(Default)]
+struct NamedLookup {
+    death: Option<usize>,
+    sleep: Option<usize>,
+    boat: Option<usize>,
+    elytra_fly: Option<usize>,
+    fly: Option<usize>,
+    swim_stand: Option<usize>,
+    ladder_up: Option<usize>,
+    ladder_down: Option<usize>,
+    ladder_stillness: Option<usize>,
+    climb: Option<usize>,
+    climbing: Option<usize>,
+    use_drink: Option<usize>,
+    use_spyglass: Option<usize>,
+    use_spear: Option<usize>,
+    use_crossbow: Option<usize>,
+    use_brush: Option<usize>,
+    use_horn: Option<usize>,
+    use_shield: Option<usize>,
+    hold_off_shield: Option<usize>,
+    hold_off_sword: Option<usize>,
+    hold_off_bow: Option<usize>,
+    hold_off_crossbow: Option<usize>,
+    hold_off_tool: Option<usize>,
+    hold_off_fishing: Option<usize>,
+    hold_off_spear: Option<usize>,
+    use_off_shield: Option<usize>,
+    use_off_eat: Option<usize>,
+    use_off_drink: Option<usize>,
+    use_off_bow: Option<usize>,
+    use_off_crossbow: Option<usize>,
+    use_off_spear: Option<usize>,
+    use_off_spyglass: Option<usize>,
+    swing_offhand: Option<usize>,
+}
+
+impl NamedLookup {
+    fn from_named(named: &[(String, AnimSlot)]) -> Self {
+        let find = |keys: &[&str]| -> Option<usize> {
+            for k in keys {
+                if let Some(idx) = named.iter().position(|(n, _)| n == k) {
+                    return Some(idx);
+                }
+            }
+            None
+        };
+        Self {
+            death: find(&["death", "die"]),
+            sleep: find(&["sleep"]),
+            boat: find(&["boat"]),
+            elytra_fly: find(&["elytra_fly", "elytra"]),
+            fly: find(&["fly"]),
+            swim_stand: find(&["swim_stand"]),
+            ladder_up: find(&["ladder_up", "climb"]),
+            ladder_down: find(&["ladder_down", "climb"]),
+            ladder_stillness: find(&["ladder_stillness", "climbing", "climb"]),
+            climb: find(&["climb"]),
+            climbing: find(&["climbing", "climb"]),
+            use_drink: find(&["use_mainhand:drink", "use_mainhand:eat"]),
+            use_spyglass: find(&["use_mainhand:spyglass"]),
+            use_spear: find(&["use_mainhand:spear", "use_mainhand:lance"]),
+            use_crossbow: find(&["use_mainhand:crossbow", "use_mainhand:bow"]),
+            use_brush: find(&["use_mainhand$minecraft:brush", "use_mainhand"]),
+            use_horn: find(&["use_mainhand$minecraft:goat_horn", "use_mainhand:drink"]),
+            use_shield: find(&["use_mainhand:shield", "hold_mainhand:shield"]),
+            hold_off_shield: find(&["hold_offhand:shield"]),
+            hold_off_sword: find(&["hold_offhand:sword"]),
+            hold_off_bow: find(&["hold_offhand:bow"]),
+            hold_off_crossbow: find(&["hold_offhand:crossbow"]),
+            hold_off_tool: find(&["hold_offhand:pickaxe", "hold_offhand:axe", "hold_offhand:shovel", "hold_offhand:hoe"]),
+            hold_off_fishing: find(&["hold_offhand:fishing"]),
+            hold_off_spear: find(&["hold_offhand:spear", "hold_offhand:lance"]),
+            use_off_shield: find(&["use_offhand:shield", "hold_offhand:shield"]),
+            use_off_eat: find(&["use_offhand:eat"]),
+            use_off_drink: find(&["use_offhand:drink", "use_offhand:eat"]),
+            use_off_bow: find(&["use_offhand:bow"]),
+            use_off_crossbow: find(&["use_offhand:crossbow", "use_offhand:bow"]),
+            use_off_spear: find(&["use_offhand:spear", "use_offhand:lance"]),
+            use_off_spyglass: find(&["use_offhand:spyglass"]),
+            swing_offhand: find(&["swing_offhand"]),
+        }
+    }
+}
+
 pub struct YTreeModel {
     sprite: &'static str,
     scale: f32,
     bones: Vec<TreeBone>,
     slots: [Option<AnimSlot>; TOTAL_SLOTS],
     named: Vec<(String, AnimSlot)>,
+    lookup: NamedLookup,
 }
 
 impl YTreeModel {
@@ -327,7 +453,7 @@ fn xform_pt(m: &Mat4, p: Vec3, scale: f32) -> Vec3 {
     let wx = m[0][0] * p[0] + m[1][0] * p[1] + m[2][0] * p[2] + m[3][0];
     let wy = m[0][1] * p[0] + m[1][1] * p[1] + m[2][1] * p[2] + m[3][1];
     let wz = m[0][2] * p[0] + m[1][2] * p[1] + m[2][2] * p[2] + m[3][2];
-    [-wx * scale, wy * scale, -wz * scale]
+    [wx * scale, wy * scale, -wz * scale]
 }
 
 fn read_f32(b: &[u8], off: &mut usize) -> Option<f32> {
@@ -495,11 +621,13 @@ fn decode_ytree(slug: &str, sprite: &'static str, b: &[u8]) -> Option<YTreeModel
             || lower == "allbody"
             || lower == "upperbody"
             || lower == "head";
+        let is_locator = lower.ends_with("locator");
         let role = classify_bone(&lower);
         bones.push(TreeBone {
             role,
             is_core_root,
             is_gui_prop,
+            is_locator,
             depth,
             subtree_end,
             pivot,
@@ -510,7 +638,8 @@ fn decode_ytree(slug: &str, sprite: &'static str, b: &[u8]) -> Option<YTreeModel
     let (slots, named) = load_file(slug, "yanim")
         .map(|yb| decode_yanim(&yb))
         .unwrap_or_else(|| (std::array::from_fn(|_| None), Vec::new()));
-    Some(YTreeModel { sprite, scale, bones, slots, named })
+    let lookup = NamedLookup::from_named(&named);
+    Some(YTreeModel { sprite, scale, bones, slots, named, lookup })
 }
 
 static YTREE_CACHE: OnceLock<Vec<Option<YTreeModel>>> = OnceLock::new();
@@ -690,6 +819,30 @@ fn apply_procedural_locomotion(bones: &[TreeBone], attrs: &mut [BoneAttr], slot:
                 BoneRole::Skirt | BoneRole::Hair => a.rot[0] += 0.20,
                 _ => {}
             },
+            SLOT_SWIM => {
+                let stroke = (t * 5.2).sin();
+                let kick = (t * 7.8).sin();
+                match b.role {
+                    BoneRole::Root => {
+                        a.rot[0] -= 1.25;
+                        a.pos[1] += (t * 2.6).sin() * 0.4;
+                    }
+                    BoneRole::Head => a.rot[0] += 0.55,
+                    BoneRole::LeftArm => {
+                        a.rot[0] += 1.65 + stroke * 0.85;
+                        a.rot[2] -= 0.45 + stroke.abs() * 0.25;
+                    }
+                    BoneRole::RightArm => {
+                        a.rot[0] += 1.65 - stroke * 0.85;
+                        a.rot[2] += 0.45 + stroke.abs() * 0.25;
+                    }
+                    BoneRole::LeftLeg => a.rot[0] += kick * 0.55,
+                    BoneRole::RightLeg => a.rot[0] -= kick * 0.55,
+                    BoneRole::LeftLowerLeg => a.rot[0] -= 0.25 + kick.max(0.0) * 0.35,
+                    BoneRole::RightLowerLeg => a.rot[0] -= 0.25 + (-kick).max(0.0) * 0.35,
+                    _ => {}
+                }
+            }
             _ => match b.role {
                 BoneRole::UpperBody => a.rot[0] += breath * 0.025,
                 BoneRole::LeftArm => a.rot[2] -= 0.06 + breath * 0.03,
@@ -813,7 +966,7 @@ fn apply_procedural_gesture(bones: &[TreeBone], attrs: &mut [BoneAttr], g_idx: u
                     _ => {}
                 }
             }
-            _ => {
+            7 => {
                 // victory (屠龙凯旋招牌动作)
                 match b.role {
                     BoneRole::UpperBody => a.rot[1] += 0.20,
@@ -829,6 +982,32 @@ fn apply_procedural_gesture(bones: &[TreeBone], attrs: &mut [BoneAttr], g_idx: u
                     _ => {}
                 }
             }
+            _ => {
+                // mace_twirl (重锤/武器旋风甩动 [3.8.0彩蛋])
+                let flourish = (t * 7.5).sin();
+                match b.role {
+                    BoneRole::UpperBody => {
+                        a.rot[0] -= 0.08;
+                        a.rot[1] -= 0.22 + flourish * 0.06;
+                    }
+                    BoneRole::Head => a.rot[1] += 0.20,
+                    BoneRole::RightArm => {
+                        a.rot[0] += 0.95 + flourish * 0.18;
+                        a.rot[1] += 0.20;
+                        a.rot[2] += 0.35 + flourish * 0.12;
+                    }
+                    BoneRole::RightForeArm => {
+                        a.rot[0] += 0.35 + flourish * 0.25;
+                    }
+                    BoneRole::LeftArm => {
+                        a.rot[0] -= 0.15;
+                        a.rot[2] -= 0.42;
+                    }
+                    BoneRole::LeftLeg => a.rot[0] += 0.18,
+                    BoneRole::RightLeg => a.rot[0] -= 0.18,
+                    _ => {}
+                }
+            }
         }
     }
 }
@@ -838,15 +1017,25 @@ struct BlendCache {
     last_time: f32,
     swing_start: f32,
     was_swinging: bool,
-    last_arm_slot: Option<usize>,
+    off_swing_start: f32,
+    was_off_swinging: bool,
+    last_arm_key: Option<u32>,
     arm_slot_start: f32,
+    last_off_key: Option<u32>,
+    off_slot_start: f32,
     attrs: Vec<BoneAttr>,
 }
 
 static LOCAL_BLEND: OnceLock<Mutex<Option<BlendCache>>> = OnceLock::new();
 
+fn named_clip(model: &YTreeModel, idx: Option<usize>) -> Option<&AnimSlot> {
+    idx.and_then(|i| model.named.get(i)).map(|(_, c)| c)
+}
+
 /// Evaluate official `AnimationRegister.java` state machine + `YesSteveModel-Native` `ModelState::Extract`
-/// with real `arm.animation.json` held-item / use / swing overlays, riding pose, silky cross-fade blending,
+/// with full client-side posture coverage (`death`, `sleep`, `boat`, `ride`, `elytra_fly`, `swim`, `swim_stand`,
+/// `ladder_up/down/stillness`, `fly`, `jump`, `sneak/sneaking`, `run`, `walk`, `idle`),
+/// mainhand & offhand `arm.animation.json` hold / use / swing overlays, silky cross-fade blending,
 /// and 3D held item rendering directly on the animated hand locator bones!
 #[allow(clippy::too_many_arguments)]
 pub fn draw_ytree_model(
@@ -855,15 +1044,7 @@ pub fn draw_ytree_model(
     g_idx: usize,
     named_anim_idx: Option<usize>,
     player: &MobRender<'_>,
-    local: bool,
-    riding: bool,
-    crouching: bool,
-    moving: bool,
-    sprinting: bool,
-    jumping: bool,
-    swinging: bool,
-    held_cat: HeldCat,
-    use_kind: UseKind,
+    st: &PlayerAnimState,
     main_stack: Option<&ItemStack>,
     off_stack: Option<&ItemStack>,
 ) -> (bool, &'static str) {
@@ -882,9 +1063,10 @@ pub fn draw_ytree_model(
 
     let time_sec = (draw.animation_time() as f32) * 0.05;
     let walk_speed = player.walk_speed.min(1.0);
-    let is_moving = moving || walk_speed > 0.03;
-    let in_air = if local { jumping } else { !player.on_ground };
-    let tint = if player.hurt_time > 0 { 0xFF8888 } else { 0xFFFFFF };
+    let is_moving = st.moving || walk_speed > 0.03;
+    let in_air = if st.local { st.jumping } else { !player.on_ground };
+    let is_dead = player.death_time > 0;
+    let tint = if player.hurt_time > 0 || is_dead { 0xFF8888 } else { 0xFFFFFF };
 
     let mut attrs = vec![BoneAttr::default(); model.bones.len()];
 
@@ -893,19 +1075,30 @@ pub fn draw_ytree_model(
         apply_slot(pre, time_sec, &mut attrs, false, true);
     }
 
-    // Layer 1: Primary animation state (custom `/ysm_play <name>` > `G` extra gesture > official locomotion priority!)
+    // Layer 1: Primary animation state (custom `/ysm_play <name>` > `G` extra gesture > official YSM priority!)
     let active_named = named_anim_idx.and_then(|i| model.named.get(i));
     let active_gesture = active_named.is_none()
         && g_idx > 0
-        && !riding
+        && !is_dead
+        && !st.sleeping
+        && !st.riding
+        && !st.elytra_flying
+        && !st.creative_flying
+        && !st.climbing
+        && !st.in_water
+        && !st.swimming
         && !is_moving
-        && !crouching
+        && !st.crouching
         && !in_air
         && player.hurt_time == 0;
     let state_name: &'static str;
+    let suppress_head_look: bool;
+    let suppress_arm_overlay: bool;
 
     if let Some((_, clip)) = active_named {
         state_name = "custom";
+        suppress_head_look = false;
+        suppress_arm_overlay = true;
         let hold_last = clip.loop_mode == LOOP_HOLD_LAST;
         apply_slot(clip, time_sec, &mut attrs, false, hold_last);
     } else if active_gesture {
@@ -917,28 +1110,178 @@ pub fn draw_ytree_model(
             4 => "extra4/sit",
             5 => "extra5/dance",
             6 => "extra6/bow",
-            _ => "extra7/victory",
+            7 => "extra7/victory",
+            _ => "extra8/mace_twirl",
         };
-        if let Some(ref clip) = model.slots[extra_slot] {
-            apply_slot(clip, time_sec, &mut attrs, false, false);
+        suppress_head_look = false;
+        suppress_arm_overlay = true;
+        if g_idx <= 7 {
+            if let Some(ref clip) = model.slots[extra_slot] {
+                apply_slot(clip, time_sec, &mut attrs, false, false);
+            } else {
+                if let Some(ref idle) = model.slots[SLOT_IDLE] {
+                    apply_slot(idle, time_sec, &mut attrs, false, false);
+                }
+                apply_procedural_gesture(&model.bones, &mut attrs, g_idx, time_sec);
+            }
         } else {
             if let Some(ref idle) = model.slots[SLOT_IDLE] {
                 apply_slot(idle, time_sec, &mut attrs, false, false);
             }
             apply_procedural_gesture(&model.bones, &mut attrs, g_idx, time_sec);
         }
+    } else if is_dead {
+        state_name = "death";
+        suppress_head_look = true;
+        suppress_arm_overlay = true;
+        if let Some(clip) = named_clip(model, model.lookup.death) {
+            let death_t = (player.death_time as f32) * 0.05;
+            apply_slot(clip, death_t, &mut attrs, false, true);
+        } else {
+            // Procedural fall-over death fallback
+            let p = ((player.death_time as f32) / 20.0).clamp(0.0, 1.0);
+            for (i, b) in model.bones.iter().enumerate() {
+                if b.role == BoneRole::Root {
+                    attrs[i].rot[2] += p * 1.52;
+                    attrs[i].pos[1] -= p * 10.0;
+                }
+            }
+        }
+    } else if player.hurt_time > 0 {
+        state_name = "attacked";
+        suppress_head_look = false;
+        suppress_arm_overlay = false;
+        if let Some(ref clip) = model.slots[SLOT_ATTACKED] {
+            apply_slot(clip, time_sec, &mut attrs, false, false);
+        } else {
+            apply_procedural_locomotion(&model.bones, &mut attrs, SLOT_ATTACKED, time_sec);
+        }
+    } else if st.sleeping {
+        state_name = "sleep";
+        suppress_head_look = true;
+        suppress_arm_overlay = true;
+        if let Some(clip) = named_clip(model, model.lookup.sleep) {
+            apply_slot(clip, time_sec, &mut attrs, false, false);
+        } else {
+            for (i, b) in model.bones.iter().enumerate() {
+                if b.role == BoneRole::Root {
+                    attrs[i].rot[0] += 1.52;
+                    attrs[i].pos[1] -= 8.0;
+                }
+            }
+        }
+    } else if st.riding && st.in_boat {
+        state_name = "boat";
+        suppress_head_look = false;
+        suppress_arm_overlay = false;
+        if let Some(clip) = named_clip(model, model.lookup.boat).or(model.slots[SLOT_RIDE].as_ref()) {
+            apply_slot(clip, time_sec, &mut attrs, false, clip.loop_mode == LOOP_HOLD_LAST);
+        } else {
+            apply_procedural_locomotion(&model.bones, &mut attrs, SLOT_RIDE, time_sec);
+        }
+    } else if st.riding {
+        state_name = "ride";
+        suppress_head_look = false;
+        suppress_arm_overlay = false;
+        if let Some(ref clip) = model.slots[SLOT_RIDE] {
+            apply_slot(clip, time_sec, &mut attrs, false, false);
+        } else {
+            apply_procedural_locomotion(&model.bones, &mut attrs, SLOT_RIDE, time_sec);
+        }
+    } else if st.elytra_flying {
+        state_name = "elytra_fly";
+        suppress_head_look = false;
+        suppress_arm_overlay = false;
+        if let Some(clip) = named_clip(model, model.lookup.elytra_fly) {
+            apply_slot(clip, time_sec, &mut attrs, false, false);
+        } else {
+            for (i, b) in model.bones.iter().enumerate() {
+                match b.role {
+                    BoneRole::Root => attrs[i].rot[0] -= 1.35,
+                    BoneRole::Head => attrs[i].rot[0] += 0.55,
+                    BoneRole::LeftArm => attrs[i].rot[2] -= 0.85,
+                    BoneRole::RightArm => attrs[i].rot[2] += 0.85,
+                    _ => {}
+                }
+            }
+        }
+    } else if st.swimming {
+        state_name = "swim";
+        suppress_head_look = false;
+        suppress_arm_overlay = false;
+        if let Some(ref clip) = model.slots[SLOT_SWIM] {
+            apply_slot(clip, time_sec, &mut attrs, false, false);
+        } else {
+            apply_procedural_locomotion(&model.bones, &mut attrs, SLOT_SWIM, time_sec);
+        }
+    } else if st.in_water {
+        state_name = "swim_stand";
+        suppress_head_look = false;
+        suppress_arm_overlay = false;
+        if let Some(clip) = named_clip(model, model.lookup.swim_stand).or(model.slots[SLOT_SWIM].as_ref()) {
+            apply_slot(clip, time_sec, &mut attrs, false, false);
+        } else {
+            apply_procedural_locomotion(&model.bones, &mut attrs, SLOT_SWIM, time_sec);
+        }
+    } else if st.climbing {
+        suppress_head_look = false;
+        suppress_arm_overlay = false;
+        let (sname, clip_idx) = if st.climb_vy > 0.03 {
+            ("ladder_up", model.lookup.ladder_up.or(model.lookup.climb))
+        } else if st.climb_vy < -0.03 {
+            ("ladder_down", model.lookup.ladder_down.or(model.lookup.climb))
+        } else {
+            ("ladder_stillness", model.lookup.ladder_stillness.or(model.lookup.climbing).or(model.lookup.climb))
+        };
+        state_name = sname;
+        if let Some(clip) = named_clip(model, clip_idx) {
+            apply_slot(clip, time_sec, &mut attrs, false, false);
+        } else {
+            let cyc = if st.climb_vy.abs() > 0.03 { (time_sec * 8.0).sin() } else { 0.0 };
+            for (i, b) in model.bones.iter().enumerate() {
+                match b.role {
+                    BoneRole::LeftArm => attrs[i].rot[0] += 1.45 + cyc * 0.55,
+                    BoneRole::RightArm => attrs[i].rot[0] += 1.45 - cyc * 0.55,
+                    BoneRole::LeftLeg => attrs[i].rot[0] += 0.35 - cyc * 0.45,
+                    BoneRole::RightLeg => attrs[i].rot[0] += 0.35 + cyc * 0.45,
+                    _ => {}
+                }
+            }
+        }
+    } else if st.creative_flying {
+        state_name = "fly";
+        suppress_head_look = false;
+        suppress_arm_overlay = false;
+        if let Some(clip) = named_clip(model, model.lookup.fly) {
+            apply_slot(clip, time_sec, &mut attrs, false, false);
+        } else {
+            let bob = (time_sec * 3.0).sin();
+            for (i, b) in model.bones.iter().enumerate() {
+                match b.role {
+                    BoneRole::Root => {
+                        attrs[i].pos[1] += 1.2 + bob * 0.6;
+                        if is_moving {
+                            attrs[i].rot[0] -= 0.35;
+                        }
+                    }
+                    BoneRole::LeftArm => attrs[i].rot[2] -= 0.35 + bob * 0.08,
+                    BoneRole::RightArm => attrs[i].rot[2] += 0.35 + bob * 0.08,
+                    BoneRole::LeftLeg => attrs[i].rot[0] += 0.25,
+                    BoneRole::RightLeg => attrs[i].rot[0] -= 0.15,
+                    _ => {}
+                }
+            }
+        }
     } else {
-        let (primary_slot, sname) = if player.hurt_time > 0 {
-            (SLOT_ATTACKED, "attacked")
-        } else if riding {
-            (SLOT_RIDE, "ride")
-        } else if in_air {
+        suppress_head_look = false;
+        suppress_arm_overlay = false;
+        let (primary_slot, sname) = if in_air {
             (SLOT_JUMP, "jump")
-        } else if crouching && is_moving {
+        } else if st.crouching && is_moving {
             (SLOT_SNEAK, "sneak")
-        } else if crouching {
+        } else if st.crouching {
             (SLOT_SNEAKING, "sneaking")
-        } else if (sprinting && is_moving) || walk_speed > 0.65 {
+        } else if (st.sprinting && is_moving) || (!st.local && walk_speed > 0.96) {
             (SLOT_RUN, "run")
         } else if is_moving {
             (SLOT_WALK, "walk")
@@ -949,102 +1292,212 @@ pub fn draw_ytree_model(
         if let Some(ref clip) = model.slots[primary_slot] {
             apply_slot(clip, time_sec, &mut attrs, false, false);
         } else {
-            // Model's `main.animation.json` omitted this slot (e.g. controller-driven walk/sneak):
-            // play smooth hierarchical bone-tree locomotion so every model animates naturally!
             apply_procedural_locomotion(&model.bones, &mut attrs, primary_slot, time_sec);
         }
     }
 
     // Layer 2: `parallel` (official blinking, hair physics, skirt physics)
-    if let Some(ref par) = model.slots[SLOT_PARALLEL] {
-        apply_slot(par, time_sec, &mut attrs, true, false);
+    if !is_dead {
+        if let Some(ref par) = model.slots[SLOT_PARALLEL] {
+            apply_slot(par, time_sec, &mut attrs, true, false);
+        }
     }
 
-    // Layer 2.5: Official YSM `ConditionalHold.java` + `ConditionalUse.java` (`arm.animation.json`)!
-    // Per official YSM InnerClassify.java, plain blocks / unclassified items return EMPTY (no forced raised-arm pose);
-    // and `hold_mainhand:sword / bow / pickaxe / shield` + `use_mainhand:bow` use Bedrock `hold_on_last_frame`
-    // (play draw transition ONCE then hold steady on the final frame instead of looping!).
-    let arm_slot = if active_gesture || active_named.is_some() {
+    // Layer 2.5a: Official YSM Mainhand `ConditionalHold` + `ConditionalUse` (`arm.animation.json`)!
+    enum ArmClip<'a> {
+        Slot(usize, &'a AnimSlot, bool),
+        Named(u32, &'a AnimSlot, bool),
+        Procedural(u32),
+    }
+
+    let main_clip = if suppress_arm_overlay {
         None
     } else {
-        match use_kind {
-            UseKind::Bow => Some(SLOT_USE_BOW),
-            UseKind::Eat => Some(SLOT_USE_EAT),
-            UseKind::Block => Some(SLOT_HOLD_SHIELD),
-            UseKind::None => match held_cat {
-                HeldCat::Empty | HeldCat::Item => None,
-                HeldCat::Sword => Some(SLOT_HOLD_SWORD),
-                HeldCat::Bow => Some(SLOT_HOLD_BOW),
-                HeldCat::Crossbow => Some(SLOT_HOLD_CROSSBOW),
-                HeldCat::Tool => Some(SLOT_HOLD_TOOL),
-                HeldCat::Shield => Some(SLOT_HOLD_SHIELD),
-                HeldCat::Fishing => Some(SLOT_HOLD_FISHING),
-                HeldCat::Spear => Some(SLOT_HOLD_SPEAR),
-            },
-        }
-    };
-    if let Some(aslot) = arm_slot {
-        let hold_last = !matches!(aslot, SLOT_HOLD_FISHING | SLOT_USE_EAT);
-        let arm_time = if local && hold_last {
-            let lock = LOCAL_BLEND.get_or_init(|| Mutex::new(None));
-            lock.lock()
-                .ok()
-                .and_then(|mut g| {
-                    if let Some(c) = g.as_mut() {
-                        if c.last_arm_slot != Some(aslot) {
-                            c.last_arm_slot = Some(aslot);
-                            c.arm_slot_start = time_sec;
-                        }
-                        Some((time_sec - c.arm_slot_start).max(0.0))
+        match st.main_use {
+            UseKind::Bow => model.slots[SLOT_USE_BOW].as_ref().map(|c| ArmClip::Slot(SLOT_USE_BOW, c, true)).or(Some(ArmClip::Procedural(101))),
+            UseKind::Crossbow => named_clip(model, model.lookup.use_crossbow).or(model.slots[SLOT_USE_BOW].as_ref()).map(|c| ArmClip::Named(201, c, true)).or(Some(ArmClip::Procedural(101))),
+            UseKind::Eat => model.slots[SLOT_USE_EAT].as_ref().map(|c| ArmClip::Slot(SLOT_USE_EAT, c, false)).or(Some(ArmClip::Procedural(102))),
+            UseKind::Drink => named_clip(model, model.lookup.use_drink).or(model.slots[SLOT_USE_EAT].as_ref()).map(|c| ArmClip::Named(202, c, false)).or(Some(ArmClip::Procedural(102))),
+            UseKind::Block => named_clip(model, model.lookup.use_shield).or(model.slots[SLOT_HOLD_SHIELD].as_ref()).map(|c| ArmClip::Named(203, c, true)).or(Some(ArmClip::Procedural(103))),
+            UseKind::Spyglass => named_clip(model, model.lookup.use_spyglass).map(|c| ArmClip::Named(204, c, true)).or(Some(ArmClip::Procedural(104))),
+            UseKind::Spear => named_clip(model, model.lookup.use_spear).or(model.slots[SLOT_HOLD_SPEAR].as_ref()).map(|c| ArmClip::Named(205, c, true)).or(Some(ArmClip::Procedural(105))),
+            UseKind::Brush => named_clip(model, model.lookup.use_brush).map(|c| ArmClip::Named(206, c, false)).or(Some(ArmClip::Procedural(106))),
+            UseKind::Horn => named_clip(model, model.lookup.use_horn).map(|c| ArmClip::Named(207, c, true)).or(Some(ArmClip::Procedural(104))),
+            UseKind::None => {
+                let s = match st.main_cat {
+                    HeldCat::Empty | HeldCat::Item => None,
+                    HeldCat::Sword => Some((SLOT_HOLD_SWORD, true)),
+                    HeldCat::Bow => Some((SLOT_HOLD_BOW, true)),
+                    HeldCat::Crossbow => Some((SLOT_HOLD_CROSSBOW, true)),
+                    HeldCat::Tool => Some((SLOT_HOLD_TOOL, true)),
+                    HeldCat::Shield => Some((SLOT_HOLD_SHIELD, true)),
+                    HeldCat::Fishing => Some((SLOT_HOLD_FISHING, false)),
+                    HeldCat::Spear => Some((SLOT_HOLD_SPEAR, true)),
+                };
+                s.map(|(slot_id, hold)| {
+                    if let Some(ref c) = model.slots[slot_id] {
+                        ArmClip::Slot(slot_id, c, hold)
                     } else {
-                        None
+                        ArmClip::Procedural(slot_id as u32)
                     }
                 })
-                .unwrap_or(10.0)
-        } else if hold_last {
-            10.0
-        } else {
-            time_sec
-        };
-        if let Some(ref clip) = model.slots[aslot] {
-            apply_slot(clip, arm_time, &mut attrs, false, hold_last);
-        } else {
-            // Procedural fallback ONLY for classified weapons/tools/fishing rods when a model omits that clip
-            for (i, bone) in model.bones.iter().enumerate() {
-                match bone.role {
-                    BoneRole::RightArm => {
-                        attrs[i].rot[0] = match use_kind {
-                            UseKind::Bow => 1.45,
-                            UseKind::Eat => 1.35 + (time_sec * 16.0).sin() * 0.15,
-                            UseKind::Block => 0.95,
-                            UseKind::None => match held_cat {
-                                HeldCat::Bow | HeldCat::Crossbow => 1.25,
-                                HeldCat::Fishing => 0.78 + (time_sec * 2.4).sin() * 0.06,
-                                _ => 0.45,
-                            },
-                        };
-                        attrs[i].rot[1] = if use_kind == UseKind::Block { 0.45 } else { 0.10 };
+            }
+        }
+    };
+
+    let main_arm_key = match main_clip {
+        Some(ArmClip::Slot(s, _, _)) => Some(s as u32),
+        Some(ArmClip::Named(k, _, _)) => Some(k),
+        Some(ArmClip::Procedural(k)) => Some(k),
+        None => None,
+    };
+
+    if let Some(ac) = main_clip {
+        match ac {
+            ArmClip::Slot(_, clip, hold_last) | ArmClip::Named(_, clip, hold_last) => {
+                let arm_time = if st.local && hold_last {
+                    let lock = LOCAL_BLEND.get_or_init(|| Mutex::new(None));
+                    lock.lock()
+                        .ok()
+                        .and_then(|mut g| {
+                            if let Some(c) = g.as_mut() {
+                                if c.last_arm_key != main_arm_key {
+                                    c.last_arm_key = main_arm_key;
+                                    c.arm_slot_start = time_sec;
+                                }
+                                Some((time_sec - c.arm_slot_start).max(0.0))
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(10.0)
+                } else if hold_last {
+                    10.0
+                } else {
+                    time_sec
+                };
+                let sample_t = if hold_last { arm_time * 2.5 } else { arm_time };
+                apply_slot(clip, sample_t, &mut attrs, false, hold_last);
+            }
+            ArmClip::Procedural(_) => {
+                for (i, bone) in model.bones.iter().enumerate() {
+                    match bone.role {
+                        BoneRole::RightArm => {
+                            attrs[i].rot[0] = match st.main_use {
+                                UseKind::Bow | UseKind::Crossbow => 1.45,
+                                UseKind::Eat | UseKind::Drink => 1.35 + (time_sec * 16.0).sin() * 0.15,
+                                UseKind::Block => 0.95,
+                                UseKind::Spyglass | UseKind::Horn => 1.75,
+                                UseKind::Spear => 2.55,
+                                UseKind::Brush => 1.05 + (time_sec * 10.0).sin() * 0.25,
+                                UseKind::None => match st.main_cat {
+                                    HeldCat::Bow | HeldCat::Crossbow => 1.25,
+                                    HeldCat::Fishing => 0.78 + (time_sec * 2.4).sin() * 0.06,
+                                    _ => 0.45,
+                                },
+                            };
+                            attrs[i].rot[1] = if st.main_use == UseKind::Block { 0.45 } else { 0.10 };
+                        }
+                        BoneRole::RightForeArm if st.main_cat == HeldCat::Fishing => {
+                            attrs[i].rot[0] = 0.25;
+                        }
+                        BoneRole::LeftArm
+                            if st.main_use == UseKind::Bow
+                                || st.main_use == UseKind::Crossbow
+                                || st.main_cat == HeldCat::Bow
+                                || st.main_cat == HeldCat::Crossbow =>
+                        {
+                            attrs[i].rot[0] = 1.40;
+                            attrs[i].rot[1] = -0.35;
+                        }
+                        _ => {}
                     }
-                    BoneRole::RightForeArm if held_cat == HeldCat::Fishing => {
-                        attrs[i].rot[0] = 0.25;
-                    }
-                    BoneRole::LeftArm
-                        if use_kind == UseKind::Bow
-                            || held_cat == HeldCat::Bow
-                            || held_cat == HeldCat::Crossbow =>
-                    {
-                        attrs[i].rot[0] = 1.40;
-                        attrs[i].rot[1] = -0.35;
-                    }
-                    _ => {}
                 }
             }
         }
-    } else if local {
+    } else if st.local {
         if let Some(lock) = LOCAL_BLEND.get() {
             if let Ok(mut g) = lock.lock() {
                 if let Some(c) = g.as_mut() {
-                    c.last_arm_slot = None;
+                    c.last_arm_key = None;
+                }
+            }
+        }
+    }
+
+    // Layer 2.5b: Official YSM Offhand `hold_offhand:*` + `use_offhand:*`!
+    let off_clip: Option<(u32, Option<&AnimSlot>, bool)> = if suppress_arm_overlay {
+        None
+    } else {
+        match st.off_use {
+            UseKind::Block => Some((301, named_clip(model, model.lookup.use_off_shield), true)),
+            UseKind::Eat => Some((302, named_clip(model, model.lookup.use_off_eat), false)),
+            UseKind::Drink => Some((303, named_clip(model, model.lookup.use_off_drink), false)),
+            UseKind::Bow => Some((304, named_clip(model, model.lookup.use_off_bow), true)),
+            UseKind::Crossbow => Some((305, named_clip(model, model.lookup.use_off_crossbow), true)),
+            UseKind::Spear => Some((306, named_clip(model, model.lookup.use_off_spear), true)),
+            UseKind::Spyglass | UseKind::Horn => Some((307, named_clip(model, model.lookup.use_off_spyglass), true)),
+            UseKind::Brush => Some((308, None, false)),
+            UseKind::None => match st.off_cat {
+                HeldCat::Empty | HeldCat::Item => None,
+                HeldCat::Shield => Some((311, named_clip(model, model.lookup.hold_off_shield), true)),
+                HeldCat::Sword => Some((312, named_clip(model, model.lookup.hold_off_sword), true)),
+                HeldCat::Bow => Some((313, named_clip(model, model.lookup.hold_off_bow), true)),
+                HeldCat::Crossbow => Some((314, named_clip(model, model.lookup.hold_off_crossbow), true)),
+                HeldCat::Tool => Some((315, named_clip(model, model.lookup.hold_off_tool), true)),
+                HeldCat::Fishing => Some((316, named_clip(model, model.lookup.hold_off_fishing), false)),
+                HeldCat::Spear => Some((317, named_clip(model, model.lookup.hold_off_spear), true)),
+            },
+        }
+    };
+
+    let off_arm_key = off_clip.map(|(k, _, _)| k);
+    if let Some((_, maybe_clip, hold_last)) = off_clip {
+        if let Some(clip) = maybe_clip {
+            let off_time = if st.local && hold_last {
+                let lock = LOCAL_BLEND.get_or_init(|| Mutex::new(None));
+                lock.lock()
+                    .ok()
+                    .and_then(|mut g| {
+                        if let Some(c) = g.as_mut() {
+                            if c.last_off_key != off_arm_key {
+                                c.last_off_key = off_arm_key;
+                                c.off_slot_start = time_sec;
+                            }
+                            Some((time_sec - c.off_slot_start).max(0.0))
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(10.0)
+            } else if hold_last {
+                10.0
+            } else {
+                time_sec
+            };
+            let sample_t = if hold_last { off_time * 2.5 } else { off_time };
+            apply_slot(clip, sample_t, &mut attrs, false, hold_last);
+        } else {
+            for (i, bone) in model.bones.iter().enumerate() {
+                if bone.role == BoneRole::LeftArm {
+                    attrs[i].rot[0] = match st.off_use {
+                        UseKind::Block => 0.95,
+                        UseKind::Eat | UseKind::Drink => 1.35 + (time_sec * 16.0).sin() * 0.15,
+                        UseKind::Spyglass | UseKind::Horn => 1.75,
+                        UseKind::Bow | UseKind::Crossbow => 1.45,
+                        UseKind::Spear => 2.55,
+                        UseKind::Brush => 1.05 + (time_sec * 10.0).sin() * 0.25,
+                        UseKind::None => 0.45,
+                    };
+                    attrs[i].rot[1] = if st.off_use == UseKind::Block { -0.45 } else { -0.10 };
+                }
+            }
+        }
+    } else if st.local {
+        if let Some(lock) = LOCAL_BLEND.get() {
+            if let Ok(mut g) = lock.lock() {
+                if let Some(c) = g.as_mut() {
+                    c.last_off_key = None;
                 }
             }
         }
@@ -1052,9 +1505,9 @@ pub fn draw_ytree_model(
 
     // Layer 3: Head look-at + GUI prop culling + root safety
     for (i, bone) in model.bones.iter().enumerate() {
-        if bone.role == BoneRole::Head {
+        if bone.role == BoneRole::Head && !suppress_head_look {
             attrs[i].rot[0] += -player.pitch.clamp(-55.0, 55.0).to_radians();
-            attrs[i].rot[1] += player.head_yaw.clamp(-70.0, 70.0).to_radians();
+            attrs[i].rot[1] += -player.head_yaw.clamp(-70.0, 70.0).to_radians();
         }
         if bone.is_gui_prop {
             attrs[i].scale = [0.0, 0.0, 0.0];
@@ -1067,8 +1520,8 @@ pub fn draw_ytree_model(
         }
     }
 
-    // Layer 4: Smooth cross-fade blending + left-click arm swing overlay (local player)
-    if local {
+    // Layer 4: Smooth cross-fade blending + mainhand & offhand swing overlays (local player)
+    if st.local {
         let model_ptr = model as *const YTreeModel as usize;
         let lock = LOCAL_BLEND.get_or_init(|| Mutex::new(None));
         if let Ok(mut guard) = lock.lock() {
@@ -1084,23 +1537,30 @@ pub fn draw_ytree_model(
                 *guard = Some(BlendCache {
                     model_ptr,
                     last_time: time_sec,
-                    swing_start: if swinging { time_sec } else { -10.0 },
-                    was_swinging: swinging,
-                    last_arm_slot: arm_slot,
+                    swing_start: if st.main_swinging { time_sec } else { -10.0 },
+                    was_swinging: st.main_swinging,
+                    off_swing_start: if st.off_swinging { time_sec } else { -10.0 },
+                    was_off_swinging: st.off_swinging,
+                    last_arm_key: main_arm_key,
                     arm_slot_start: time_sec,
+                    last_off_key: off_arm_key,
+                    off_slot_start: time_sec,
                     attrs: attrs.clone(),
                 });
             } else if let Some(cache) = guard.as_mut() {
                 let dt = (time_sec - cache.last_time).clamp(0.0, 0.1);
                 cache.last_time = time_sec;
-                if swinging && (!cache.was_swinging || (time_sec - cache.swing_start) > 0.36) {
+                if st.main_swinging && (!cache.was_swinging || (time_sec - cache.swing_start) > 0.36) {
                     cache.swing_start = time_sec;
                 }
-                cache.was_swinging = swinging;
+                cache.was_swinging = st.main_swinging;
+                if st.off_swinging && (!cache.was_off_swinging || (time_sec - cache.off_swing_start) > 0.36) {
+                    cache.off_swing_start = time_sec;
+                }
+                cache.was_off_swinging = st.off_swinging;
 
                 let alpha = (dt * 14.0).clamp(0.12, 1.0);
                 for (prev, target) in cache.attrs.iter_mut().zip(attrs.iter_mut()) {
-                    // Instant hide/show for zero-scale GUI/effect subtrees so they never flash
                     let target_hidden = target.scale[0].abs() < 1e-3
                         || target.scale[1].abs() < 1e-3
                         || target.scale[2].abs() < 1e-3;
@@ -1117,9 +1577,9 @@ pub fn draw_ytree_model(
                     }
                 }
 
-                // Real YSM `swing:sword` / `sword_attack_01` clip (with `v.qh=1`) OR additive slash swing (0.36s)
+                // Mainhand swing overlay (0.36s)
                 let swing_age = time_sec - cache.swing_start;
-                if (0.0..0.36).contains(&swing_age) {
+                if !suppress_arm_overlay && (0.0..0.36).contains(&swing_age) {
                     if let Some(ref swing_clip) = model.slots[SLOT_SWING].as_ref().filter(|c| c.has_rot_motion) {
                         apply_slot(swing_clip, swing_age, &mut attrs, false, true);
                     } else {
@@ -1136,6 +1596,29 @@ pub fn draw_ytree_model(
                                 }
                                 BoneRole::UpperBody => {
                                     attrs[i].rot[1] -= swing * 0.25;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+
+                // Offhand swing overlay (0.36s)
+                let off_swing_age = time_sec - cache.off_swing_start;
+                if !suppress_arm_overlay && (0.0..0.36).contains(&off_swing_age) {
+                    if let Some(swing_clip) = named_clip(model, model.lookup.swing_offhand).filter(|c| c.has_rot_motion) {
+                        apply_slot(swing_clip, off_swing_age, &mut attrs, false, true);
+                    } else {
+                        let p = off_swing_age / 0.36;
+                        let swing = (p * std::f32::consts::PI).sin();
+                        for (i, bone) in model.bones.iter().enumerate() {
+                            match bone.role {
+                                BoneRole::LeftArm => {
+                                    attrs[i].rot[0] += swing * 1.65;
+                                    attrs[i].rot[1] += swing * 0.45;
+                                }
+                                BoneRole::LeftForeArm => {
+                                    attrs[i].rot[0] += swing * 0.55;
                                 }
                                 _ => {}
                             }
@@ -1167,9 +1650,19 @@ pub fn draw_ytree_model(
             (bone.pivot[1] + attr.pos[1]) * MODEL_UNIT,
             (bone.pivot[2] + attr.pos[2]) * MODEL_UNIT,
         );
-        let rx = bone.rest_rotation[0] + attr.rot[0];
-        let ry = bone.rest_rotation[1] + attr.rot[1];
-        let rz = bone.rest_rotation[2] + attr.rot[2];
+        let locator_rot_corrupt = bone.is_locator
+            && ((attr.rot[0] - attr.pos[0]).abs() < 0.02
+                && (attr.rot[1] - attr.pos[1]).abs() < 0.02
+                && (attr.rot[2] - attr.pos[2]).abs() < 0.02
+                || ((attr.rot[0] - attr.rot[1]).abs() < 0.01
+                    && (attr.rot[1] - attr.rot[2]).abs() < 0.01
+                    && attr.rot[0].abs() > 0.5)
+                || attr.rot[0].abs() > 3.2
+                || attr.rot[1].abs() > 3.2
+                || attr.rot[2].abs() > 3.2);
+        let rx = if locator_rot_corrupt { bone.rest_rotation[0] } else { bone.rest_rotation[0] + attr.rot[0] };
+        let ry = if locator_rot_corrupt { bone.rest_rotation[1] } else { bone.rest_rotation[1] + attr.rot[1] };
+        let rz = if locator_rot_corrupt { bone.rest_rotation[2] } else { bone.rest_rotation[2] + attr.rot[2] };
         if rx != 0.0 || ry != 0.0 || rz != 0.0 {
             let rot = euler_zyx([rx, ry, rz]);
             m = mat4_mul(&m, &rot);
@@ -1214,48 +1707,72 @@ pub fn draw_ytree_model(
 
         if !bone.quads.is_empty() {
             for q in &bone.quads {
+                // Reverse winding [1, 0, 3, 2] with mirrored U [u1, v0, u0, v1] so each vertex keeps its exact UV
+                // while converting left-handed Bedrock coordinates to right-handed Horizon draw space.
                 let corners = [
-                    xform_pt(&m, q.corners[0], model.scale),
                     xform_pt(&m, q.corners[1], model.scale),
-                    xform_pt(&m, q.corners[2], model.scale),
+                    xform_pt(&m, q.corners[0], model.scale),
                     xform_pt(&m, q.corners[3], model.scale),
+                    xform_pt(&m, q.corners[2], model.scale),
                 ];
-                let _ = draw.quad(model.sprite, corners, q.uv16, tint);
+                let uv16 = [q.uv16[2], q.uv16[1], q.uv16[0], q.uv16[3]];
+                let _ = draw.quad(model.sprite, corners, uv16, tint);
             }
         }
         idx += 1;
     }
 
-    // Render actual 3D held items directly in the character's animated right & left hands!
+    // Render actual 3D held items directly in the character's animated right (main) & left (off) hands!
     let draw_hand_item = |draw: &mut dyn BlockEntityDrawContext,
                           stack: &ItemStack,
                           hand: Option<(u8, Vec3, Mat4)>,
-                          ctx: ItemDisplayContext| {
+                          ctx: ItemDisplayContext,
+                          is_left: bool| {
         if let Some((_, pos, m)) = hand {
-            // Extract bone Euler angles from upper 3x3 of m (matching 180-deg Y flip)
-            let sx = (m[0][0] * m[0][0] + m[0][1] * m[0][1] + m[0][2] * m[0][2]).sqrt().max(1e-4);
-            let sy = (m[1][0] * m[1][0] + m[1][1] * m[1][1] + m[1][2] * m[1][2]).sqrt().max(1e-4);
-            let sz = (m[2][0] * m[2][0] + m[2][1] * m[2][1] + m[2][2] * m[2][2]).sqrt().max(1e-4);
-            let r02 = (m[0][2] / sx).clamp(-1.0, 1.0);
-            let pitch_deg = (m[1][2] / sy).atan2(m[2][2] / sz).to_degrees();
-            let yaw_deg = (-r02).asin().to_degrees();
-            let roll_deg = (m[0][1] / sx).atan2(m[0][0] / sx).to_degrees();
+            // Column lengths of upper 3x3 of column-major Bedrock bone matrix m (`m[col][row]`)
+            let c0 = (m[0][0] * m[0][0] + m[0][1] * m[0][1] + m[0][2] * m[0][2]).sqrt().max(1e-4);
+            let c1 = (m[1][0] * m[1][0] + m[1][1] * m[1][1] + m[1][2] * m[1][2]).sqrt().max(1e-4);
+            let c2 = (m[2][0] * m[2][0] + m[2][1] * m[2][1] + m[2][2] * m[2][2]).sqrt().max(1e-4);
+
+            // Conjugate R_bed by F = diag(1, 1, -1) (Z mirror used in xform_pt)
+            // to get exact proper rotation R_draw in Horizon's right-handed Y-up, +Z-forward draw space:
+            let r02 = -m[2][0] / c2;
+            let r10 = m[0][1] / c0;
+            let r11 = m[1][1] / c1;
+            let r12 = -m[2][1] / c2;
+            let r22 = m[2][2] / c2;
+
+            // Exact decomposition of R_draw = Ry(yaw) * Rx(pitch) * Rz(roll)
+            let pitch_deg = (-r12).clamp(-1.0, 1.0).asin().to_degrees();
+            let yaw_deg = r02.atan2(r22).to_degrees();
+            let roll_deg = r10.atan2(r11).to_degrees();
 
             draw.push();
             draw.translate(pos);
             draw.rotate_about([0.0, 1.0, 0.0], yaw_deg, [0.0; 3]);
-            draw.rotate_about([1.0, 0.0, 0.0], -pitch_deg, [0.0; 3]);
-            draw.rotate_about([0.0, 0.0, 1.0], -roll_deg, [0.0; 3]);
-            draw.scale([0.90, 0.90, 0.90]);
+            draw.rotate_about([1.0, 0.0, 0.0], pitch_deg, [0.0; 3]);
+            draw.rotate_about([0.0, 0.0, 1.0], roll_deg, [0.0; 3]);
+            // Exact match to vanilla `base_transform` (scale(-1,-1,1)) * `hand_base` (Rx(-90°) * Ry(180°))
+            // expressed in our +Y-up, +Z-forward draw space: Ry(180°) * Rx(-90°) maps (x,y,z) -> (-x, +z, +y),
+            // so item +X -> -X (char right), item +Y -> +Z (char forward!), item +Z -> +Y (char up!).
+            draw.rotate_about([0.0, 1.0, 0.0], 180.0, [0.0; 3]);
+            draw.rotate_about([1.0, 0.0, 0.0], -90.0, [0.0; 3]);
+            // Optional 3.8.0 Mace/Weapon Twirl flourish (`G` -> extra8/mace_twirl)!
+            if !is_left && g_idx == 8 {
+                let spin_deg = (time_sec * 420.0) % 360.0;
+                draw.rotate_about([1.0, 0.0, 0.0], spin_deg, [0.0; 3]);
+            }
+            draw.translate([if is_left { -0.02 } else { 0.02 }, 0.02, -0.04]);
+            draw.scale([0.85, 0.85, 0.85]);
             let _ = draw.item(stack, ctx, None, 0);
             draw.pop();
         }
     };
     if let Some(stack) = main_stack {
-        draw_hand_item(draw, stack, right_hand, ItemDisplayContext::ThirdPersonRightHand);
+        draw_hand_item(draw, stack, right_hand, ItemDisplayContext::ThirdPersonRightHand, false);
     }
     if let Some(stack) = off_stack {
-        draw_hand_item(draw, stack, left_hand, ItemDisplayContext::ThirdPersonLeftHand);
+        draw_hand_item(draw, stack, left_hand, ItemDisplayContext::ThirdPersonLeftHand, true);
     }
 
     (true, state_name)

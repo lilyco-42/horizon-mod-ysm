@@ -1,4 +1,4 @@
-# horizon-mod-ysm (`ysm_models` v3.8.0)
+# horizon-mod-ysm (`ysm_models` v4.0.2)
 
 Standalone **Horizon** native mod delivering a 1:1 Rust port of **Yes Steve Model** (`YesSteveModel-Native` + `YesSteveModel`, Apache-2.0).
 
@@ -7,7 +7,7 @@ Standalone **Horizon** native mod delivering a 1:1 Rust port of **Yes Steve Mode
 - 30-slot `.yanim` player (`idle / walk / run / sneak / jump / ride / swim / extra0..7 / arm.animation.json`)
 - Real 3D held-item rendering in both hands (`ThirdPersonRightHand` / `ThirdPersonLeftHand`)
 - Horse/vehicle riding detection (`ride` pose) + silky cross-fade blending + left-click swing overlay
-- Includes `crates/ysm-native-port` (22/22 unit tests) & CC0 3-color `lyco_ip` model generator
+- Hot-loadable CC0 models via `O` preview panel; shared YSM compiler lives in the `lilyco-horizon` monorepo
 
 ## Build & Install
 ```bash
